@@ -1,9 +1,18 @@
-use std::{ffi::OsStr, iter::once, mem::zeroed, os::windows::ffi::OsStrExt, ptr::null_mut};
+use std::{
+    ffi::OsStr,
+    iter::once,
+    mem::{size_of, zeroed},
+    os::windows::ffi::OsStrExt,
+    ptr::null_mut,
+};
 use winapi::{
     ctypes::c_void,
-    shared::{minwindef, windef},
+    shared::{
+        minwindef::LRESULT,
+        windef::{HDC, HWND, RECT},
+    },
     um::{
-        libloaderapi,
+        libloaderapi::GetModuleHandleW,
         memoryapi::{VirtualAlloc, VirtualFree},
         wingdi::{
             StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD, SRCCOPY,
@@ -68,7 +77,7 @@ unsafe fn resize_dib_section(width: i32, height: i32) {
     BITMAP_WIDTH = width;
     BITMAP_HEIGHT = height;
 
-    BITMAP_INFO.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as _;
+    BITMAP_INFO.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as _;
     BITMAP_INFO.bmiHeader.biWidth = BITMAP_WIDTH;
     BITMAP_INFO.bmiHeader.biHeight = -BITMAP_HEIGHT;
     BITMAP_INFO.bmiHeader.biPlanes = 1;
@@ -84,7 +93,7 @@ unsafe fn resize_dib_section(width: i32, height: i32) {
     );
 }
 
-unsafe fn update_window(device_context: windef::HDC, client_rect: &windef::RECT) {
+unsafe fn update_window(device_context: HDC, client_rect: &RECT) {
     let window_width = client_rect.right - client_rect.left;
     let window_height = client_rect.bottom - client_rect.top;
 
@@ -106,13 +115,13 @@ unsafe fn update_window(device_context: windef::HDC, client_rect: &windef::RECT)
 }
 
 unsafe extern "system" fn main_window_callback(
-    window: windef::HWND,
+    window: HWND,
     message: u32,
     w_param: usize,
     l_param: isize,
-) -> minwindef::LRESULT {
+) -> LRESULT {
     let mut result = 0;
-    let mut client_rect = windef::RECT::default();
+    let mut client_rect = RECT::default();
     GetClientRect(window, &mut client_rect);
 
     match message {
@@ -146,7 +155,7 @@ pub fn main() {
         let window_class = WNDCLASSW {
             style: CS_OWNDC | CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(main_window_callback),
-            hInstance: libloaderapi::GetModuleHandleW(null_mut()),
+            hInstance: GetModuleHandleW(null_mut()),
             lpszClassName: win32_string(WINDOW_CLASS_NAME).as_ptr(),
             cbClsExtra: 0,
             cbWndExtra: 0,
@@ -190,7 +199,7 @@ pub fn main() {
                     render_weird_gradient(x_offset, y_offset);
 
                     let device_context = GetDC(window);
-                    let mut client_rect = windef::RECT::default();
+                    let mut client_rect = RECT::default();
                     GetClientRect(window, &mut client_rect);
                     update_window(device_context, &client_rect);
                     ReleaseDC(window, device_context);

@@ -1,18 +1,23 @@
+use std::{ffi::OsStr, iter::once, mem::zeroed, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
-    shared::windef::{HBITMAP, HDC, HGDIOBJ, HWND, RECT},
+    ctypes::c_void,
+    shared::{minwindef, windef},
     um::{
+        libloaderapi,
+        memoryapi::{VirtualAlloc, VirtualFree},
         wingdi::{
-            CreateCompatibleDC, CreateDIBSection, DeleteObject, StretchDIBits, BITMAPINFO,
-            BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD, SRCCOPY,
+            StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD, SRCCOPY,
         },
-        winuser,
+        winnt::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE},
+        winuser::*,
     },
 };
-use winit::{
-    os::windows::WindowExt, ControlFlow, Event::WindowEvent, WindowBuilder, WindowEvent::*,
-};
 
+const BYTES_PER_PIXEL: i32 = 4;
 const WINDOW_NAME: &str = "Walking Skeleton";
+const WINDOW_CLASS_NAME: &str = "WalkingSkeletonWindowClass";
+
+static mut RUNNING: bool = true;
 static mut BITMAP_INFO: BITMAPINFO = BITMAPINFO {
     bmiHeader: BITMAPINFOHEADER {
         biSize: 0,
@@ -34,47 +39,65 @@ static mut BITMAP_INFO: BITMAPINFO = BITMAPINFO {
         rgbReserved: 0,
     }; 1],
 };
-static mut BITMAP_MEMORY: *mut std::ffi::c_void = std::ptr::null_mut();
-static mut BITMAP_HANDLE: HBITMAP = std::ptr::null_mut();
-static mut BITMAP_DEVICE_CONTEXT: HDC = std::ptr::null_mut();
+static mut BITMAP_MEMORY: *mut c_void = null_mut();
+
+static mut BITMAP_WIDTH: i32 = 0;
+static mut BITMAP_HEIGHT: i32 = 0;
+
+unsafe fn render_weird_gradient(x_offset: i32, y_offset: i32) {
+    let pitch = BITMAP_WIDTH * BYTES_PER_PIXEL;
+    for y in 0..BITMAP_HEIGHT {
+        let row = (BITMAP_MEMORY as *mut u8).offset((y * pitch) as isize);
+        for x in 0..BITMAP_WIDTH {
+            let pixel = row.offset((x * BYTES_PER_PIXEL) as isize);
+            let blue = pixel;
+            let green = pixel.offset(1);
+            let red = pixel.offset(2);
+            *red = 0;
+            *green = (y + y_offset) as u8;
+            *blue = (x + x_offset) as u8;
+        }
+    }
+}
 
 unsafe fn resize_dib_section(width: i32, height: i32) {
-    if !BITMAP_HANDLE.is_null() {
-        DeleteObject(BITMAP_HANDLE as HGDIOBJ);
+    if !BITMAP_MEMORY.is_null() {
+        VirtualFree(BITMAP_MEMORY, 0, MEM_RELEASE);
     }
 
-    if BITMAP_DEVICE_CONTEXT.is_null() {
-        BITMAP_DEVICE_CONTEXT = CreateCompatibleDC(std::ptr::null_mut());
-    }
+    BITMAP_WIDTH = width;
+    BITMAP_HEIGHT = height;
 
     BITMAP_INFO.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as _;
-    BITMAP_INFO.bmiHeader.biWidth = width;
-    BITMAP_INFO.bmiHeader.biHeight = height;
+    BITMAP_INFO.bmiHeader.biWidth = BITMAP_WIDTH;
+    BITMAP_INFO.bmiHeader.biHeight = -BITMAP_HEIGHT;
     BITMAP_INFO.bmiHeader.biPlanes = 1;
     BITMAP_INFO.bmiHeader.biBitCount = 32;
     BITMAP_INFO.bmiHeader.biCompression = BI_RGB;
 
-    BITMAP_HANDLE = CreateDIBSection(
-        BITMAP_DEVICE_CONTEXT,
-        &BITMAP_INFO as _,
-        DIB_RGB_COLORS,
-        &mut BITMAP_MEMORY,
-        std::ptr::null_mut(),
-        0,
+    let bitmap_memory_size = BYTES_PER_PIXEL * BITMAP_WIDTH * BITMAP_HEIGHT;
+    BITMAP_MEMORY = VirtualAlloc(
+        null_mut(),
+        bitmap_memory_size as usize,
+        MEM_RESERVE | MEM_COMMIT,
+        PAGE_READWRITE,
     );
 }
 
-unsafe fn update_window(device_context: HDC, x: i32, y: i32, width: i32, height: i32) {
+unsafe fn update_window(device_context: windef::HDC, client_rect: &windef::RECT) {
+    let window_width = client_rect.right - client_rect.left;
+    let window_height = client_rect.bottom - client_rect.top;
+
     StretchDIBits(
         device_context,
-        x,
-        y,
-        width,
-        height,
-        x,
-        y,
-        width,
-        height,
+        0,
+        0,
+        BITMAP_WIDTH,
+        BITMAP_HEIGHT,
+        0,
+        0,
+        window_width,
+        window_height,
         BITMAP_MEMORY,
         &BITMAP_INFO,
         DIB_RGB_COLORS,
@@ -82,70 +105,104 @@ unsafe fn update_window(device_context: HDC, x: i32, y: i32, width: i32, height:
     );
 }
 
+unsafe extern "system" fn main_window_callback(
+    window: windef::HWND,
+    message: u32,
+    w_param: usize,
+    l_param: isize,
+) -> minwindef::LRESULT {
+    let mut result = 0;
+    let mut client_rect = windef::RECT::default();
+    GetClientRect(window, &mut client_rect);
+
+    match message {
+        WM_ACTIVATEAPP => {}
+        WM_CLOSE | WM_DESTROY => RUNNING = false,
+        WM_PAINT => {
+            let mut paint = PAINTSTRUCT::default();
+            let device_context = BeginPaint(window, &mut paint);
+            update_window(device_context, &client_rect);
+            EndPaint(window, &paint);
+        }
+        WM_SIZE => {
+            let width = client_rect.right - client_rect.left;
+            let height = client_rect.bottom - client_rect.top;
+            resize_dib_section(width, height);
+        }
+        _ => {
+            result = DefWindowProcW(window, message, w_param, l_param);
+        }
+    }
+
+    result
+}
+
+fn win32_string(value: &str) -> Vec<u16> {
+    OsStr::new(value).encode_wide().chain(once(0)).collect()
+}
+
 pub fn main() {
-    let mut events_loop = winit::EventsLoop::new();
-    let window = WindowBuilder::new()
-        .with_title(WINDOW_NAME)
-        .build(&events_loop)
-        .expect("could not create window");
+    unsafe {
+        let window_class = WNDCLASSW {
+            style: CS_OWNDC | CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(main_window_callback),
+            hInstance: libloaderapi::GetModuleHandleW(null_mut()),
+            lpszClassName: win32_string(WINDOW_CLASS_NAME).as_ptr(),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hIcon: null_mut(),
+            hCursor: null_mut(),
+            hbrBackground: null_mut(),
+            lpszMenuName: null_mut(),
+        };
 
-    events_loop.run_forever(|event| match event {
-        // wm_size
-        WindowEvent {
-            event: Resized(logical_size),
-            ..
-        } => {
-            println!("wm_size: {:?}", logical_size);
+        if RegisterClassW(&window_class) > 0 {
+            let window = CreateWindowExW(
+                0,
+                window_class.lpszClassName,
+                win32_string(WINDOW_NAME).as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                null_mut(),
+                null_mut(),
+                window_class.hInstance,
+                null_mut(),
+            );
 
-            let hwnd = window.get_hwnd() as HWND;
-            let mut client_rect = RECT::default();
-            unsafe {
-                winuser::GetClientRect(hwnd, &mut client_rect);
-                let width = client_rect.right - client_rect.left;
-                let height = client_rect.bottom - client_rect.top;
-                resize_dib_section(width, height);
+            if !window.is_null() {
+                let mut x_offset = 0;
+                let mut y_offset = 0;
+
+                while RUNNING {
+                    let mut message = zeroed();
+                    while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                        if message.message == WM_QUIT {
+                            RUNNING = false;
+                        }
+
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+
+                    render_weird_gradient(x_offset, y_offset);
+
+                    let device_context = GetDC(window);
+                    let mut client_rect = windef::RECT::default();
+                    GetClientRect(window, &mut client_rect);
+                    update_window(device_context, &client_rect);
+                    ReleaseDC(window, device_context);
+
+                    x_offset += 1;
+                    y_offset += 2;
+                }
+            } else {
+                // TODO: logging
             }
-
-            ControlFlow::Continue
+        } else {
+            // TODO: logging
         }
-        // wm_destroy
-        WindowEvent {
-            event: Destroyed, ..
-        } => {
-            println!("wm_destroy");
-            ControlFlow::Break
-        }
-        // wm_close
-        WindowEvent {
-            event: CloseRequested,
-            ..
-        } => {
-            println!("wm_close");
-            ControlFlow::Break
-        }
-        // wm_activateapp
-        WindowEvent {
-            event: Focused(gained_focus),
-            ..
-        } => {
-            println!("wm_activateapp: gained focus: {}", gained_focus);
-            ControlFlow::Continue
-        }
-        WindowEvent { event: Refresh, .. } => {
-            let mut paint = winuser::PAINTSTRUCT::default();
-            let hwnd = window.get_hwnd() as HWND;
-            unsafe {
-                let device_context = winuser::BeginPaint(hwnd, &mut paint);
-                let x = paint.rcPaint.left;
-                let y = paint.rcPaint.top;
-                let width = paint.rcPaint.right - paint.rcPaint.left;
-                let height = paint.rcPaint.bottom - paint.rcPaint.top;
-                update_window(device_context, x, y, width, height);
-                winuser::EndPaint(hwnd, &paint);
-            }
-
-            ControlFlow::Continue
-        }
-        _ => ControlFlow::Continue,
-    });
+    }
 }

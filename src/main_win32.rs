@@ -1,29 +1,21 @@
-use std::{
-    ffi::OsStr,
-    iter::once,
-    mem::{size_of, zeroed},
-    os::windows::ffi::OsStrExt,
-    ptr::null_mut,
-};
+use std::{ffi::OsStr, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
     ctypes::c_void,
-    shared::{
-        minwindef::LRESULT,
-        windef::{HDC, HWND, RECT},
-    },
+    shared::{minwindef::LRESULT, windef::*, winerror::ERROR_SUCCESS},
     um::{
-        libloaderapi::GetModuleHandleW,
-        memoryapi::{VirtualAlloc, VirtualFree},
-        wingdi::{
-            StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD, SRCCOPY,
-        },
-        winnt::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE},
-        winuser::*,
+        libloaderapi::GetModuleHandleW, memoryapi::*, wingdi::*, winnt::*, winuser::*, xinput::*,
     },
 };
 
 const WINDOW_NAME: &str = "Walking Skeleton";
 const WINDOW_CLASS_NAME: &str = "WalkingSkeletonWindowClass";
+
+const VK_W: i32 = 'W' as i32;
+const VK_A: i32 = 'A' as i32;
+const VK_S: i32 = 'S' as i32;
+const VK_D: i32 = 'D' as i32;
+const VK_Q: i32 = 'Q' as i32;
+const VK_E: i32 = 'E' as i32;
 
 static mut GLOBAL_RUNNING: bool = true;
 static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
@@ -156,6 +148,29 @@ unsafe extern "system" fn main_window_callback(
     match message {
         WM_ACTIVATEAPP => {}
         WM_CLOSE | WM_DESTROY => GLOBAL_RUNNING = false,
+        WM_SYSKEYUP | WM_SYSKEYDOWN | WM_KEYUP | WM_KEYDOWN => {
+            let vk_code = w_param as i32;
+            let was_down = l_param & (1 << 30) != 0;
+            let is_down = l_param & (1 << 31) == 0;
+
+            if was_down != is_down {
+                match vk_code {
+                    VK_W => println!("W"),
+                    VK_A => println!("A"),
+                    VK_S => println!("S"),
+                    VK_D => println!("D"),
+                    VK_Q => println!("Q"),
+                    VK_E => println!("E"),
+                    VK_UP => println!("up"),
+                    VK_LEFT => println!("left"),
+                    VK_DOWN => println!("down"),
+                    VK_RIGHT => println!("right"),
+                    VK_ESCAPE => println!("escape"),
+                    VK_SPACE => println!("space"),
+                    _ => {}
+                };
+            }
+        }
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
             let device_context = BeginPaint(window, &mut paint);
@@ -228,6 +243,38 @@ pub fn main() {
                         DispatchMessageW(&message);
                     }
 
+                    // TODO: should we poll this more frequently?
+                    for controller_index in 0..XUSER_MAX_COUNT {
+                        let mut controller_state: XINPUT_STATE = zeroed();
+                        if XInputGetState(controller_index, &mut controller_state) == ERROR_SUCCESS
+                        {
+                            // controller is plugged in
+                            let pad = controller_state.Gamepad;
+
+                            let _up = pad.wButtons & XINPUT_GAMEPAD_DPAD_UP > 0;
+                            let _down = pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN > 0;
+                            let _left = pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT > 0;
+                            let _right = pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT > 0;
+                            let _start = pad.wButtons & XINPUT_GAMEPAD_START > 0;
+                            let _back = pad.wButtons & XINPUT_GAMEPAD_BACK > 0;
+                            let _left_shoulder = pad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER > 0;
+                            let _right_shoulder = pad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER > 0;
+                            let a_button = pad.wButtons & XINPUT_GAMEPAD_A > 0;
+                            let _b_button = pad.wButtons & XINPUT_GAMEPAD_B > 0;
+                            let _x_button = pad.wButtons & XINPUT_GAMEPAD_X > 0;
+                            let _y_button = pad.wButtons & XINPUT_GAMEPAD_Y > 0;
+
+                            let _stick_x = pad.sThumbLX;
+                            let _stick_y = pad.sThumbLY;
+
+                            if a_button {
+                                y_offset += 2;
+                            }
+                        } else {
+                            // controller is not available
+                        }
+                    }
+
                     render_weird_gradient(&GLOBAL_BACK_BUFFER, x_offset, y_offset);
 
                     let device_context = GetDC(window);
@@ -242,7 +289,6 @@ pub fn main() {
                     ReleaseDC(window, device_context);
 
                     x_offset += 1;
-                    y_offset += 2;
                 }
             } else {
                 // TODO: logging

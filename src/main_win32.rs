@@ -148,7 +148,7 @@ unsafe extern "system" fn main_window_callback(
     match message {
         WM_ACTIVATEAPP => {}
         WM_CLOSE | WM_DESTROY => GLOBAL_RUNNING = false,
-        WM_SYSKEYUP | WM_SYSKEYDOWN | WM_KEYUP | WM_KEYDOWN => {
+        WM_KEYUP | WM_KEYDOWN => {
             let vk_code = w_param as i32;
             let was_down = l_param & (1 << 30) != 0;
             let is_down = l_param & (1 << 31) == 0;

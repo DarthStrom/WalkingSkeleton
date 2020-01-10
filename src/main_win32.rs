@@ -1,9 +1,10 @@
 use std::{ffi::OsStr, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
     ctypes::c_void,
-    shared::{minwindef::LRESULT, windef::*, winerror::ERROR_SUCCESS},
+    shared::{minwindef::LRESULT, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
     um::{
-        libloaderapi::GetModuleHandleW, memoryapi::*, wingdi::*, winnt::*, winuser::*, xinput::*,
+        dsound::*, libloaderapi::GetModuleHandleW, memoryapi::*, wingdi::*, winnt::*, winuser::*,
+        xinput::*,
     },
 };
 
@@ -69,6 +70,71 @@ fn get_window_dimension(window: HWND) -> WindowDimension {
     WindowDimension {
         width: client_rect.right - client_rect.left,
         height: client_rect.bottom - client_rect.top,
+    }
+}
+
+// TODO: investigate new hotness in windows sound api
+unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: u32) {
+    let mut direct_sound_ptr: LPDIRECTSOUND = zeroed();
+    if DirectSoundCreate(null_mut(), &mut direct_sound_ptr, null_mut()) == DS_OK {
+        let direct_sound = &*direct_sound_ptr;
+
+        let bits_per_sample = 16;
+        let channels = 2;
+        let block_alignment = channels * bits_per_sample / 8;
+        let mut wave_format = WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_PCM,
+            nChannels: channels,
+            nSamplesPerSec: samples_per_second,
+            nAvgBytesPerSec: samples_per_second * block_alignment as u32,
+            nBlockAlign: block_alignment,
+            wBitsPerSample: bits_per_sample,
+            cbSize: 0,
+        };
+
+        if direct_sound.SetCooperativeLevel(window, DSSCL_PRIORITY) == DS_OK {
+            let mut buffer_description: DSBUFFERDESC = zeroed();
+            buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
+            buffer_description.dwFlags = DSBCAPS_PRIMARYBUFFER;
+            let mut primary_buffer: LPDIRECTSOUNDBUFFER = zeroed();
+
+            if direct_sound.CreateSoundBuffer(
+                &mut buffer_description,
+                &mut primary_buffer,
+                null_mut(),
+            ) == DS_OK
+            {
+                if (*primary_buffer).SetFormat(&wave_format) == DS_OK {
+                    // println!("finally set the format!");
+                } else {
+                    // TODO: diagnostic - couldn't set the format
+                }
+            } else {
+                // TODO: diagnostic - couldn't create primary sound buffer
+            }
+        } else {
+            // TODO: diagnostic - couldn't set the cooperative level
+        }
+
+        let mut buffer_description: DSBUFFERDESC = zeroed();
+        buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
+        buffer_description.dwFlags = DSBCAPS_GETCURRENTPOSITION2;
+        buffer_description.dwBufferBytes = buffer_size;
+        buffer_description.lpwfxFormat = &mut wave_format;
+        let mut secondary_buffer: LPDIRECTSOUNDBUFFER = null_mut();
+
+        if direct_sound.CreateSoundBuffer(
+            &mut buffer_description,
+            &mut secondary_buffer,
+            null_mut(),
+        ) == DS_OK
+        {
+            // println!("secondary buffer created successfully!");
+        } else {
+            // TODO: diagnostic - couldn't create secondary buffer
+        }
+    } else {
+        // TODO: diagnostic - couldn't create direct sound object
     }
 }
 
@@ -232,6 +298,11 @@ pub fn main() {
                 let mut x_offset = 0;
                 let mut y_offset = 0;
                 let mut message = zeroed();
+
+                let samples_per_second = 48_000;
+                let bytes_per_sample = (size_of::<i16>() * 2) as u32;
+                let secondary_buffer_size = samples_per_second * bytes_per_sample as u32;
+                init_direct_sound(window, samples_per_second, secondary_buffer_size);
 
                 while GLOBAL_RUNNING {
                     while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {

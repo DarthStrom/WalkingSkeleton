@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 winapi = { version = "0.3.8", features = [
+    "dsound",
     "impl-default",
     "libloaderapi",
     "memoryapi",

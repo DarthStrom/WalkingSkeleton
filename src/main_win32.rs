@@ -19,6 +19,7 @@ const VK_Q: i32 = 'Q' as i32;
 const VK_E: i32 = 'E' as i32;
 
 static mut GLOBAL_RUNNING: bool = true;
+static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
 static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     info: BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -73,7 +74,8 @@ fn get_window_dimension(window: HWND) -> WindowDimension {
     }
 }
 
-// TODO: investigate new hotness in windows sound api
+// TODO: investigate XAudio2
+// waiting on https://github.com/retep998/winapi-rs/pull/602
 unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: u32) {
     let mut direct_sound_ptr: LPDIRECTSOUND = zeroed();
     if DirectSoundCreate(null_mut(), &mut direct_sound_ptr, null_mut()) == DS_OK {
@@ -98,15 +100,10 @@ unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: 
             buffer_description.dwFlags = DSBCAPS_PRIMARYBUFFER;
             let mut primary_buffer: LPDIRECTSOUNDBUFFER = zeroed();
 
-            if direct_sound.CreateSoundBuffer(
-                &mut buffer_description,
-                &mut primary_buffer,
-                null_mut(),
-            ) == DS_OK
+            if direct_sound.CreateSoundBuffer(&buffer_description, &mut primary_buffer, null_mut())
+                == DS_OK
             {
-                if (*primary_buffer).SetFormat(&wave_format) == DS_OK {
-                    // println!("finally set the format!");
-                } else {
+                if (*primary_buffer).SetFormat(&wave_format) != DS_OK {
                     // TODO: diagnostic - couldn't set the format
                 }
             } else {
@@ -121,17 +118,16 @@ unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: 
         buffer_description.dwFlags = DSBCAPS_GETCURRENTPOSITION2;
         buffer_description.dwBufferBytes = buffer_size;
         buffer_description.lpwfxFormat = &mut wave_format;
-        let mut secondary_buffer: LPDIRECTSOUNDBUFFER = null_mut();
 
-        if direct_sound.CreateSoundBuffer(
-            &mut buffer_description,
-            &mut secondary_buffer,
+        match direct_sound.CreateSoundBuffer(
+            &buffer_description,
+            &mut GLOBAL_SOUND_BUFFER,
             null_mut(),
-        ) == DS_OK
-        {
-            // println!("secondary buffer created successfully!");
-        } else {
-            // TODO: diagnostic - couldn't create secondary buffer
+        ) {
+            DS_OK => {
+                // println!("secondary buffer created successfully!");
+            }
+            e => println!("error: {}", e),
         }
     } else {
         // TODO: diagnostic - couldn't create direct sound object
@@ -295,16 +291,31 @@ pub fn main() {
             );
 
             if !window.is_null() {
+                // graphics test
                 let mut x_offset = 0;
                 let mut y_offset = 0;
-                let mut message = zeroed();
 
+                // sound test
                 let samples_per_second = 48_000;
+                let tone_hz = 256;
+                let tone_volume = 3_000;
+                let mut running_sample_index: u32 = 0;
+                let square_wave_period = samples_per_second / tone_hz;
+                let half_square_wave_period = square_wave_period / 2;
                 let bytes_per_sample = (size_of::<i16>() * 2) as u32;
-                let secondary_buffer_size = samples_per_second * bytes_per_sample as u32;
-                init_direct_sound(window, samples_per_second, secondary_buffer_size);
+                let sound_buffer_size = samples_per_second * bytes_per_sample as u32;
+
+                init_direct_sound(window, samples_per_second, sound_buffer_size);
+                match (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING) {
+                    DS_OK => (),
+                    e => {
+                        println!("error playing: {}", e);
+                    }
+                }
 
                 while GLOBAL_RUNNING {
+                    let mut message = zeroed();
+
                     while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
                         if message.message == WM_QUIT {
                             GLOBAL_RUNNING = false;
@@ -347,6 +358,79 @@ pub fn main() {
                     }
 
                     render_weird_gradient(&GLOBAL_BACK_BUFFER, x_offset, y_offset);
+
+                    // direct sound output test
+                    let mut play_cursor = 0;
+                    let mut write_cursor = 0;
+                    if (*GLOBAL_SOUND_BUFFER)
+                        .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
+                        == DS_OK
+                    {
+                        let byte_to_lock =
+                            running_sample_index * bytes_per_sample % sound_buffer_size;
+
+                        let mut bytes_to_write;
+                        if byte_to_lock > play_cursor {
+                            bytes_to_write = sound_buffer_size - byte_to_lock;
+                            bytes_to_write += play_cursor;
+                        } else {
+                            bytes_to_write = play_cursor - byte_to_lock;
+                        }
+
+                        let mut region1 = zeroed();
+                        let mut region1_size = zeroed();
+                        let mut region2 = zeroed();
+                        let mut region2_size = zeroed();
+                        if (*GLOBAL_SOUND_BUFFER).Lock(
+                            byte_to_lock,
+                            bytes_to_write,
+                            &mut region1,
+                            &mut region1_size,
+                            &mut region2,
+                            &mut region2_size,
+                            0,
+                        ) == DS_OK
+                        {
+                            let mut dest_sample = region1 as *mut i16;
+                            let region1_sample_count = region1_size / bytes_per_sample;
+                            for _ in 0..region1_sample_count {
+                                let sample_value =
+                                    if (running_sample_index / half_square_wave_period) % 2 == 0 {
+                                        tone_volume
+                                    } else {
+                                        -tone_volume
+                                    };
+                                *dest_sample = sample_value;
+                                dest_sample = dest_sample.offset(1);
+                                *dest_sample = sample_value;
+                                dest_sample = dest_sample.offset(1);
+                                running_sample_index += 1;
+                            }
+                            dest_sample = region2 as *mut i16;
+                            let region2_sample_count = region2_size / bytes_per_sample;
+                            for _ in 0..region2_sample_count {
+                                let sample_value =
+                                    if (running_sample_index / half_square_wave_period) % 2 == 0 {
+                                        tone_volume
+                                    } else {
+                                        -tone_volume
+                                    };
+
+                                *dest_sample = sample_value;
+                                dest_sample = dest_sample.offset(1);
+                                *dest_sample = sample_value;
+                                dest_sample = dest_sample.offset(1);
+                                running_sample_index += 1;
+                            }
+
+                            (*GLOBAL_SOUND_BUFFER).Unlock(
+                                region1,
+                                region1_size,
+                                region2,
+                                region2_size,
+                            );
+                        }
+                    }
 
                     let device_context = GetDC(window);
 

@@ -12,6 +12,7 @@ winapi = { version = "0.3.8", features = [
     "impl-default",
     "libloaderapi",
     "memoryapi",
+    "profileapi",
     "winuser",
     "winerror",
     "xinput",

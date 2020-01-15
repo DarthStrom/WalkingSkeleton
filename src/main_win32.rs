@@ -11,8 +11,8 @@ use winapi::{
     ctypes::c_void,
     shared::{minwindef::LRESULT, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
     um::{
-        dsound::*, libloaderapi::GetModuleHandleW, memoryapi::*, wingdi::*, winnt::*, winuser::*,
-        xinput::*,
+        dsound::*, libloaderapi::GetModuleHandleW, memoryapi::*, profileapi::*, wingdi::*,
+        winnt::*, winuser::*, xinput::*,
     },
 };
 
@@ -28,6 +28,7 @@ const VK_E: i32 = 'E' as i32;
 
 static mut GLOBAL_RUNNING: bool = true;
 static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
+static mut GLOBAL_PERFORMANCE_COUNT_FREQUENCY: i64 = 0;
 static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     info: BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -330,6 +331,10 @@ fn win32_string(value: &str) -> Vec<u16> {
 
 pub fn main() {
     unsafe {
+        let mut performance_count_frequency = zeroed();
+        QueryPerformanceFrequency(&mut performance_count_frequency);
+        GLOBAL_PERFORMANCE_COUNT_FREQUENCY = *performance_count_frequency.QuadPart();
+
         let window_class = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(main_window_callback),
@@ -384,10 +389,18 @@ pub fn main() {
                 };
 
                 init_direct_sound(window, samples_per_second, sound_buffer_size);
-                fill_sound_buffer(&mut sound_output, 0, latency_sample_count * bytes_per_sample);
+                fill_sound_buffer(
+                    &mut sound_output,
+                    0,
+                    latency_sample_count * bytes_per_sample,
+                );
                 (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING);
 
+                let mut last_counter: LARGE_INTEGER = zeroed();
+                QueryPerformanceCounter(&mut last_counter);
+
                 while GLOBAL_RUNNING {
+
                     let mut message = zeroed();
 
                     while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -449,7 +462,8 @@ pub fn main() {
                             % sound_output.sound_buffer_size;
 
                         let target_cursor = (play_cursor
-                            + (sound_output.latency_sample_count * sound_output.bytes_per_sample)) % sound_output.sound_buffer_size;
+                            + (sound_output.latency_sample_count * sound_output.bytes_per_sample))
+                            % sound_output.sound_buffer_size;
                         let bytes_to_write = match byte_to_lock.cmp(&target_cursor) {
                             Ordering::Equal => 0,
                             Ordering::Greater => {
@@ -472,7 +486,13 @@ pub fn main() {
                     );
                     ReleaseDC(window, device_context);
 
-                    x_offset += 1;
+                    let mut end_counter: LARGE_INTEGER = zeroed();
+                    QueryPerformanceCounter(&mut end_counter);
+
+                    let counter_elapsed = end_counter.QuadPart() - last_counter.QuadPart();
+                    println!("{}ms/f / {}f/s", 1000 * counter_elapsed / GLOBAL_PERFORMANCE_COUNT_FREQUENCY, GLOBAL_PERFORMANCE_COUNT_FREQUENCY / counter_elapsed);
+
+                    last_counter = end_counter;
                 }
             } else {
                 // TODO: logging

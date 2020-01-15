@@ -1,4 +1,12 @@
-use std::{ffi::OsStr, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
+use std::{
+    cmp::Ordering,
+    f32::{self, consts::PI},
+    ffi::OsStr,
+    iter::once,
+    mem::*,
+    os::windows::ffi::OsStrExt,
+    ptr::null_mut,
+};
 use winapi::{
     ctypes::c_void,
     shared::{minwindef::LRESULT, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
@@ -71,6 +79,69 @@ fn get_window_dimension(window: HWND) -> WindowDimension {
     WindowDimension {
         width: client_rect.right - client_rect.left,
         height: client_rect.bottom - client_rect.top,
+    }
+}
+
+struct SoundOutput {
+    tone_volume: f32,
+    tone_hz: u32,
+    running_sample_index: u32,
+    wave_period: u32,
+    bytes_per_sample: u32,
+    sound_buffer_size: u32,
+    samples_per_second: u32,
+    latency_sample_count: u32,
+}
+
+unsafe fn fill_sound_buffer(
+    sound_output: &mut SoundOutput,
+    byte_to_lock: u32,
+    bytes_to_write: u32,
+) {
+    let mut region1 = zeroed();
+    let mut region1_size = zeroed();
+    let mut region2 = zeroed();
+    let mut region2_size = zeroed();
+    if (*GLOBAL_SOUND_BUFFER).Lock(
+        byte_to_lock,
+        bytes_to_write,
+        &mut region1,
+        &mut region1_size,
+        &mut region2,
+        &mut region2_size,
+        0,
+    ) == DS_OK
+    {
+        let mut dest_sample = region1 as *mut i16;
+        let region1_sample_count = region1_size / sound_output.bytes_per_sample;
+        for _ in 0..region1_sample_count {
+            let t = 2.0 * PI * sound_output.running_sample_index as f32
+                / sound_output.wave_period as f32;
+            let sine_value = (t).sin();
+            let sample_value = (sine_value * sound_output.tone_volume) as i16;
+
+            *dest_sample = sample_value;
+            dest_sample = dest_sample.offset(1);
+            *dest_sample = sample_value;
+            dest_sample = dest_sample.offset(1);
+            sound_output.running_sample_index += 1;
+        }
+        dest_sample = region2 as *mut i16;
+        let region2_sample_count = region2_size / sound_output.bytes_per_sample;
+        for _ in 0..region2_sample_count {
+            let t = 2.0 * PI * sound_output.running_sample_index as f32
+                / sound_output.wave_period as f32;
+            let sine_value = (t).sin();
+            let sample_value = (sine_value * sound_output.tone_volume) as i16;
+
+            *dest_sample = sample_value;
+            dest_sample = dest_sample.offset(1);
+            *dest_sample = sample_value;
+            dest_sample = dest_sample.offset(1);
+            sound_output.running_sample_index += 1;
+        }
+
+        (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
     }
 }
 
@@ -298,20 +369,23 @@ pub fn main() {
                 // sound test
                 let samples_per_second = 48_000;
                 let tone_hz = 256;
-                let tone_volume = 3_000;
-                let mut running_sample_index: u32 = 0;
-                let square_wave_period = samples_per_second / tone_hz;
-                let half_square_wave_period = square_wave_period / 2;
                 let bytes_per_sample = (size_of::<i16>() * 2) as u32;
                 let sound_buffer_size = samples_per_second * bytes_per_sample as u32;
+                let latency_sample_count = samples_per_second / 10;
+                let mut sound_output = SoundOutput {
+                    tone_volume: 3_000.0,
+                    tone_hz,
+                    running_sample_index: 0,
+                    wave_period: samples_per_second / tone_hz,
+                    bytes_per_sample,
+                    sound_buffer_size,
+                    samples_per_second,
+                    latency_sample_count,
+                };
 
                 init_direct_sound(window, samples_per_second, sound_buffer_size);
-                match (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING) {
-                    DS_OK => (),
-                    e => {
-                        println!("error playing: {}", e);
-                    }
-                }
+                fill_sound_buffer(&mut sound_output, 0, latency_sample_count * bytes_per_sample);
+                (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING);
 
                 while GLOBAL_RUNNING {
                     let mut message = zeroed();
@@ -341,23 +415,27 @@ pub fn main() {
                             let _back = pad.wButtons & XINPUT_GAMEPAD_BACK > 0;
                             let _left_shoulder = pad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER > 0;
                             let _right_shoulder = pad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER > 0;
-                            let a_button = pad.wButtons & XINPUT_GAMEPAD_A > 0;
+                            let _a_button = pad.wButtons & XINPUT_GAMEPAD_A > 0;
                             let _b_button = pad.wButtons & XINPUT_GAMEPAD_B > 0;
                             let _x_button = pad.wButtons & XINPUT_GAMEPAD_X > 0;
                             let _y_button = pad.wButtons & XINPUT_GAMEPAD_Y > 0;
 
-                            let _stick_x = pad.sThumbLX;
-                            let _stick_y = pad.sThumbLY;
+                            let stick_x = pad.sThumbLX;
+                            let stick_y = pad.sThumbLY;
 
-                            if a_button {
-                                y_offset += 2;
-                            }
+                            x_offset += stick_x / 4096;
+                            y_offset += stick_y / 4096;
+
+                            sound_output.tone_hz =
+                                (512.0 + (256.0 * (stick_y as f32 / 30_000.0))) as u32;
+                            sound_output.wave_period =
+                                sound_output.samples_per_second / sound_output.tone_hz;
                         } else {
                             // controller is not available
                         }
                     }
 
-                    render_weird_gradient(&GLOBAL_BACK_BUFFER, x_offset, y_offset);
+                    render_weird_gradient(&GLOBAL_BACK_BUFFER, x_offset as i32, y_offset as i32);
 
                     // direct sound output test
                     let mut play_cursor = 0;
@@ -366,70 +444,21 @@ pub fn main() {
                         .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
                         == DS_OK
                     {
-                        let byte_to_lock =
-                            running_sample_index * bytes_per_sample % sound_buffer_size;
+                        let byte_to_lock = (sound_output.running_sample_index
+                            * sound_output.bytes_per_sample)
+                            % sound_output.sound_buffer_size;
 
-                        let mut bytes_to_write;
-                        if byte_to_lock > play_cursor {
-                            bytes_to_write = sound_buffer_size - byte_to_lock;
-                            bytes_to_write += play_cursor;
-                        } else {
-                            bytes_to_write = play_cursor - byte_to_lock;
-                        }
-
-                        let mut region1 = zeroed();
-                        let mut region1_size = zeroed();
-                        let mut region2 = zeroed();
-                        let mut region2_size = zeroed();
-                        if (*GLOBAL_SOUND_BUFFER).Lock(
-                            byte_to_lock,
-                            bytes_to_write,
-                            &mut region1,
-                            &mut region1_size,
-                            &mut region2,
-                            &mut region2_size,
-                            0,
-                        ) == DS_OK
-                        {
-                            let mut dest_sample = region1 as *mut i16;
-                            let region1_sample_count = region1_size / bytes_per_sample;
-                            for _ in 0..region1_sample_count {
-                                let sample_value =
-                                    if (running_sample_index / half_square_wave_period) % 2 == 0 {
-                                        tone_volume
-                                    } else {
-                                        -tone_volume
-                                    };
-                                *dest_sample = sample_value;
-                                dest_sample = dest_sample.offset(1);
-                                *dest_sample = sample_value;
-                                dest_sample = dest_sample.offset(1);
-                                running_sample_index += 1;
+                        let target_cursor = (play_cursor
+                            + (sound_output.latency_sample_count * sound_output.bytes_per_sample)) % sound_output.sound_buffer_size;
+                        let bytes_to_write = match byte_to_lock.cmp(&target_cursor) {
+                            Ordering::Equal => 0,
+                            Ordering::Greater => {
+                                (sound_output.sound_buffer_size - byte_to_lock) + target_cursor
                             }
-                            dest_sample = region2 as *mut i16;
-                            let region2_sample_count = region2_size / bytes_per_sample;
-                            for _ in 0..region2_sample_count {
-                                let sample_value =
-                                    if (running_sample_index / half_square_wave_period) % 2 == 0 {
-                                        tone_volume
-                                    } else {
-                                        -tone_volume
-                                    };
+                            Ordering::Less => target_cursor - byte_to_lock,
+                        };
 
-                                *dest_sample = sample_value;
-                                dest_sample = dest_sample.offset(1);
-                                *dest_sample = sample_value;
-                                dest_sample = dest_sample.offset(1);
-                                running_sample_index += 1;
-                            }
-
-                            (*GLOBAL_SOUND_BUFFER).Unlock(
-                                region1,
-                                region1_size,
-                                region2,
-                                region2_size,
-                            );
-                        }
+                        fill_sound_buffer(&mut sound_output, byte_to_lock, bytes_to_write);
                     }
 
                     let device_context = GetDC(window);

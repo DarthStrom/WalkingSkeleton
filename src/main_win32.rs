@@ -1,13 +1,5 @@
-use crate::game::{game_update_and_render, OffscreenBuffer};
-use std::{
-    cmp::Ordering,
-    f32::{self, consts::PI},
-    ffi::OsStr,
-    iter::once,
-    mem::*,
-    os::windows::ffi::OsStrExt,
-    ptr::null_mut,
-};
+use crate::game::{game_update_and_render, GameSoundOutputBuffer, OffscreenBuffer};
+use std::{f32, ffi::OsStr, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
     ctypes::c_void,
     shared::{minwindef::LRESULT, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
@@ -38,7 +30,6 @@ struct Win32OffscreenBuffer {
 
 static mut GLOBAL_RUNNING: bool = true;
 static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
-static mut GLOBAL_PERFORMANCE_COUNT_FREQUENCY: i64 = 0;
 static mut GLOBAL_BACK_BUFFER: Win32OffscreenBuffer = Win32OffscreenBuffer {
     info: BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -85,7 +76,6 @@ fn get_window_dimension(window: HWND) -> WindowDimension {
 }
 
 struct SoundOutput {
-    tone_volume: f32,
     tone_hz: u32,
     running_sample_index: u32,
     wave_period: u32,
@@ -95,10 +85,42 @@ struct SoundOutput {
     latency_sample_count: u32,
 }
 
+unsafe fn clear_sound_buffer(sound_output: &SoundOutput) {
+    let mut region1 = zeroed();
+    let mut region1_size = zeroed();
+    let mut region2 = zeroed();
+    let mut region2_size = zeroed();
+    if (*GLOBAL_SOUND_BUFFER).Lock(
+        0,
+        sound_output.sound_buffer_size,
+        &mut region1,
+        &mut region1_size,
+        &mut region2,
+        &mut region2_size,
+        0,
+    ) == DS_OK
+    {
+        let mut dest_sample = region1 as *mut u8;
+        for _ in 0..region1_size {
+            *dest_sample = 0;
+            dest_sample = dest_sample.wrapping_offset(1);
+        }
+        dest_sample = region2 as *mut u8;
+        for _ in 0..region2_size {
+            *dest_sample = 0;
+            dest_sample = dest_sample.wrapping_offset(1);
+        }
+        (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
+    } else {
+        eprintln!("Could not lock the sound buffer to clear it.");
+    }
+}
+
 unsafe fn fill_sound_buffer(
     sound_output: &mut SoundOutput,
     byte_to_lock: u32,
     bytes_to_write: u32,
+    source_buffer: &GameSoundOutputBuffer,
 ) {
     let mut region1 = zeroed();
     let mut region1_size = zeroed();
@@ -114,32 +136,31 @@ unsafe fn fill_sound_buffer(
         0,
     ) == DS_OK
     {
-        let mut dest_sample = region1 as *mut i16;
         let region1_sample_count = region1_size / sound_output.bytes_per_sample;
+        let mut source_sample = source_buffer.samples;
+        let mut dest_sample = region1 as *mut i16;
         for _ in 0..region1_sample_count {
-            let t = 2.0 * PI * sound_output.running_sample_index as f32
-                / sound_output.wave_period as f32;
-            let sine_value = (t).sin();
-            let sample_value = (sine_value * sound_output.tone_volume) as i16;
+            *dest_sample = *source_sample;
+            dest_sample = dest_sample.offset(1);
+            source_sample = source_sample.offset(1);
 
-            *dest_sample = sample_value;
+            *dest_sample = *source_sample;
             dest_sample = dest_sample.offset(1);
-            *dest_sample = sample_value;
-            dest_sample = dest_sample.offset(1);
+            source_sample = source_sample.offset(1);
+
             sound_output.running_sample_index += 1;
         }
-        dest_sample = region2 as *mut i16;
         let region2_sample_count = region2_size / sound_output.bytes_per_sample;
+        dest_sample = region2 as *mut i16;
         for _ in 0..region2_sample_count {
-            let t = 2.0 * PI * sound_output.running_sample_index as f32
-                / sound_output.wave_period as f32;
-            let sine_value = (t).sin();
-            let sample_value = (sine_value * sound_output.tone_volume) as i16;
+            *dest_sample = *source_sample;
+            dest_sample = dest_sample.offset(1);
+            source_sample = source_sample.offset(1);
 
-            *dest_sample = sample_value;
+            *dest_sample = *source_sample;
             dest_sample = dest_sample.offset(1);
-            *dest_sample = sample_value;
-            dest_sample = dest_sample.offset(1);
+            source_sample = source_sample.offset(1);
+
             sound_output.running_sample_index += 1;
         }
 
@@ -234,10 +255,10 @@ unsafe fn resize_dib_section(buffer: &mut Win32OffscreenBuffer, width: i32, heig
 }
 
 unsafe fn display_buffer_in_window(
+    buffer: &Win32OffscreenBuffer,
     device_context: HDC,
     window_width: i32,
     window_height: i32,
-    buffer: &Win32OffscreenBuffer,
 ) {
     StretchDIBits(
         device_context,
@@ -295,10 +316,10 @@ unsafe extern "system" fn main_window_callback(
             let mut paint = PAINTSTRUCT::default();
             let device_context = BeginPaint(window, &mut paint);
             display_buffer_in_window(
+                &GLOBAL_BACK_BUFFER,
                 device_context,
                 dimension.width,
                 dimension.height,
-                &GLOBAL_BACK_BUFFER,
             );
             EndPaint(window, &paint);
         }
@@ -317,12 +338,12 @@ fn win32_string(value: &str) -> Vec<u16> {
 
 pub fn main() {
     unsafe {
-        let mut performance_count_frequency = zeroed();
-        QueryPerformanceFrequency(&mut performance_count_frequency);
-        GLOBAL_PERFORMANCE_COUNT_FREQUENCY = *performance_count_frequency.QuadPart();
+        let mut performance_count_frequency_result = zeroed();
+        QueryPerformanceFrequency(&mut performance_count_frequency_result);
+        let performance_count_frequency = *performance_count_frequency_result.QuadPart();
 
         let window_class = WNDCLASSW {
-            style: CS_HREDRAW | CS_VREDRAW,
+            style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
             lpfnWndProc: Some(main_window_callback),
             hInstance: GetModuleHandleW(null_mut()),
             lpszClassName: win32_string(WINDOW_CLASS_NAME).as_ptr(),
@@ -353,6 +374,8 @@ pub fn main() {
             );
 
             if !window.is_null() {
+                let device_context = GetDC(window);
+
                 // graphics test
                 let mut x_offset = 0;
                 let mut y_offset = 0;
@@ -364,7 +387,6 @@ pub fn main() {
                 let sound_buffer_size = samples_per_second * bytes_per_sample as u32;
                 let latency_sample_count = samples_per_second / 10;
                 let mut sound_output = SoundOutput {
-                    tone_volume: 3_000.0,
                     tone_hz,
                     running_sample_index: 0,
                     wave_period: samples_per_second / tone_hz,
@@ -374,17 +396,29 @@ pub fn main() {
                     latency_sample_count,
                 };
 
-                init_direct_sound(window, samples_per_second, sound_buffer_size);
-                fill_sound_buffer(
-                    &mut sound_output,
-                    0,
-                    latency_sample_count * bytes_per_sample,
+                init_direct_sound(
+                    window,
+                    sound_output.samples_per_second,
+                    sound_output.sound_buffer_size,
                 );
-                (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING);
+                clear_sound_buffer(&sound_output);
+                // Shelving sound output for now - revisiting on day 19/20
+                // (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING);
+
+                GLOBAL_RUNNING = true;
+
+                // TODO: Pool with bitmap virtualalloc
+                // remove max_possible_overrun?
+                let max_possible_overrun = 2 * 8 * size_of::<u16>() as u32;
+                let samples: *mut i16 = VirtualAlloc(
+                    null_mut(),
+                    (sound_output.sound_buffer_size + max_possible_overrun) as usize,
+                    MEM_RESERVE | MEM_COMMIT,
+                    PAGE_READWRITE,
+                ) as *mut i16;
 
                 let mut last_counter: LARGE_INTEGER = zeroed();
                 QueryPerformanceCounter(&mut last_counter);
-
                 while GLOBAL_RUNNING {
                     let mut message = zeroed();
 
@@ -433,6 +467,38 @@ pub fn main() {
                         }
                     }
 
+                    let mut byte_to_lock = 0;
+                    let mut bytes_to_write = 0;
+                    let mut play_cursor = 0;
+                    let mut write_cursor = 0;
+                    let sound_is_valid = if (*GLOBAL_SOUND_BUFFER)
+                        .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
+                        == DS_OK
+                    {
+                        byte_to_lock = (sound_output.running_sample_index
+                            * sound_output.bytes_per_sample)
+                            % sound_output.sound_buffer_size;
+
+                        let target_cursor = (play_cursor
+                            + (sound_output.latency_sample_count * sound_output.bytes_per_sample))
+                            % sound_output.sound_buffer_size;
+                        bytes_to_write = if byte_to_lock > target_cursor {
+                            (sound_output.sound_buffer_size - byte_to_lock) + target_cursor
+                        } else {
+                            target_cursor - byte_to_lock
+                        };
+
+                        true
+                    } else {
+                        false
+                    };
+
+                    let sound_buffer = GameSoundOutputBuffer {
+                        samples_per_second: sound_output.samples_per_second,
+                        sample_count: sound_output.samples_per_second / 30,
+                        samples,
+                    };
+
                     let buffer = OffscreenBuffer {
                         memory: GLOBAL_BACK_BUFFER.memory,
                         width: GLOBAL_BACK_BUFFER.width,
@@ -440,43 +506,31 @@ pub fn main() {
                         pitch: GLOBAL_BACK_BUFFER.pitch,
                         bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
                     };
-                    game_update_and_render(&buffer, x_offset, y_offset);
+                    game_update_and_render(
+                        &buffer,
+                        x_offset,
+                        y_offset,
+                        &sound_buffer,
+                        sound_output.tone_hz,
+                    );
 
                     // direct sound output test
-                    let mut play_cursor = 0;
-                    let mut write_cursor = 0;
-                    if (*GLOBAL_SOUND_BUFFER)
-                        .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
-                        == DS_OK
-                    {
-                        let byte_to_lock = (sound_output.running_sample_index
-                            * sound_output.bytes_per_sample)
-                            % sound_output.sound_buffer_size;
-
-                        let target_cursor = (play_cursor
-                            + (sound_output.latency_sample_count * sound_output.bytes_per_sample))
-                            % sound_output.sound_buffer_size;
-                        let bytes_to_write = match byte_to_lock.cmp(&target_cursor) {
-                            Ordering::Equal => 0,
-                            Ordering::Greater => {
-                                (sound_output.sound_buffer_size - byte_to_lock) + target_cursor
-                            }
-                            Ordering::Less => target_cursor - byte_to_lock,
-                        };
-
-                        fill_sound_buffer(&mut sound_output, byte_to_lock, bytes_to_write);
+                    if sound_is_valid {
+                        fill_sound_buffer(
+                            &mut sound_output,
+                            byte_to_lock,
+                            bytes_to_write,
+                            &sound_buffer,
+                        );
                     }
-
-                    let device_context = GetDC(window);
 
                     let dimension = get_window_dimension(window);
                     display_buffer_in_window(
+                        &GLOBAL_BACK_BUFFER,
                         device_context,
                         dimension.width,
                         dimension.height,
-                        &GLOBAL_BACK_BUFFER,
                     );
-                    ReleaseDC(window, device_context);
 
                     let mut end_counter: LARGE_INTEGER = zeroed();
                     QueryPerformanceCounter(&mut end_counter);
@@ -484,8 +538,8 @@ pub fn main() {
                     let counter_elapsed = end_counter.QuadPart() - last_counter.QuadPart();
                     println!(
                         "{}ms/f / {}f/s",
-                        1000 * counter_elapsed / GLOBAL_PERFORMANCE_COUNT_FREQUENCY,
-                        GLOBAL_PERFORMANCE_COUNT_FREQUENCY / counter_elapsed
+                        1000 * counter_elapsed / performance_count_frequency,
+                        performance_count_frequency / counter_elapsed
                     );
 
                     last_counter = end_counter;

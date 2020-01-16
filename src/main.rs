@@ -1,3 +1,4 @@
+mod game;
 #[cfg(target_os = "windows")]
 #[path = "main_win32.rs"]
 mod platform;

@@ -1,3 +1,4 @@
+use crate::game::{game_update_and_render, OffscreenBuffer};
 use std::{
     cmp::Ordering,
     f32::{self, consts::PI},
@@ -26,10 +27,19 @@ const VK_D: i32 = 'D' as i32;
 const VK_Q: i32 = 'Q' as i32;
 const VK_E: i32 = 'E' as i32;
 
+struct Win32OffscreenBuffer {
+    info: BITMAPINFO,
+    memory: *mut c_void,
+    width: i32,
+    height: i32,
+    pitch: i32,
+    bytes_per_pixel: i32,
+}
+
 static mut GLOBAL_RUNNING: bool = true;
 static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
 static mut GLOBAL_PERFORMANCE_COUNT_FREQUENCY: i64 = 0;
-static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
+static mut GLOBAL_BACK_BUFFER: Win32OffscreenBuffer = Win32OffscreenBuffer {
     info: BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: 0,
@@ -57,15 +67,6 @@ static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     pitch: 0,
     bytes_per_pixel: 4,
 };
-
-struct OffscreenBuffer {
-    info: BITMAPINFO,
-    memory: *mut c_void,
-    width: i32,
-    height: i32,
-    pitch: i32,
-    bytes_per_pixel: i32,
-}
 
 struct WindowDimension {
     width: i32,
@@ -206,22 +207,7 @@ unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: 
     }
 }
 
-unsafe fn render_weird_gradient(buffer: &OffscreenBuffer, x_offset: i32, y_offset: i32) {
-    for y in 0..buffer.height {
-        let row = (buffer.memory as *mut u8).offset((y * buffer.pitch) as isize);
-        for x in 0..buffer.width {
-            let pixel = row.offset((x * buffer.bytes_per_pixel) as isize);
-            let blue = pixel;
-            let green = pixel.offset(1);
-            let red = pixel.offset(2);
-            *red = 0;
-            *green = (y + y_offset) as u8;
-            *blue = (x + x_offset) as u8;
-        }
-    }
-}
-
-unsafe fn resize_dib_section(buffer: &mut OffscreenBuffer, width: i32, height: i32) {
+unsafe fn resize_dib_section(buffer: &mut Win32OffscreenBuffer, width: i32, height: i32) {
     if !buffer.memory.is_null() {
         VirtualFree(buffer.memory, 0, MEM_RELEASE);
     }
@@ -251,7 +237,7 @@ unsafe fn display_buffer_in_window(
     device_context: HDC,
     window_width: i32,
     window_height: i32,
-    buffer: &OffscreenBuffer,
+    buffer: &Win32OffscreenBuffer,
 ) {
     StretchDIBits(
         device_context,
@@ -400,7 +386,6 @@ pub fn main() {
                 QueryPerformanceCounter(&mut last_counter);
 
                 while GLOBAL_RUNNING {
-
                     let mut message = zeroed();
 
                     while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -436,8 +421,8 @@ pub fn main() {
                             let stick_x = pad.sThumbLX;
                             let stick_y = pad.sThumbLY;
 
-                            x_offset += stick_x / 4096;
-                            y_offset += stick_y / 4096;
+                            x_offset += stick_x as i32 / 4096;
+                            y_offset += stick_y as i32 / 4096;
 
                             sound_output.tone_hz =
                                 (512.0 + (256.0 * (stick_y as f32 / 30_000.0))) as u32;
@@ -448,7 +433,14 @@ pub fn main() {
                         }
                     }
 
-                    render_weird_gradient(&GLOBAL_BACK_BUFFER, x_offset as i32, y_offset as i32);
+                    let buffer = OffscreenBuffer {
+                        memory: GLOBAL_BACK_BUFFER.memory,
+                        width: GLOBAL_BACK_BUFFER.width,
+                        height: GLOBAL_BACK_BUFFER.height,
+                        pitch: GLOBAL_BACK_BUFFER.pitch,
+                        bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
+                    };
+                    game_update_and_render(&buffer, x_offset, y_offset);
 
                     // direct sound output test
                     let mut play_cursor = 0;
@@ -490,7 +482,11 @@ pub fn main() {
                     QueryPerformanceCounter(&mut end_counter);
 
                     let counter_elapsed = end_counter.QuadPart() - last_counter.QuadPart();
-                    println!("{}ms/f / {}f/s", 1000 * counter_elapsed / GLOBAL_PERFORMANCE_COUNT_FREQUENCY, GLOBAL_PERFORMANCE_COUNT_FREQUENCY / counter_elapsed);
+                    println!(
+                        "{}ms/f / {}f/s",
+                        1000 * counter_elapsed / GLOBAL_PERFORMANCE_COUNT_FREQUENCY,
+                        GLOBAL_PERFORMANCE_COUNT_FREQUENCY / counter_elapsed
+                    );
 
                     last_counter = end_counter;
                 }

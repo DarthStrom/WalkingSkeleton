@@ -35,6 +35,7 @@ pub fn game_update_and_render(
     };
 }
 
+// TODO: platform independent code should get priority for removing unsafe
 unsafe fn game_output_sound(sound_buffer: &GameSoundOutputBuffer, tone_hz: u32) {
     let tone_volume = 3_000.0;
     let wave_period = sound_buffer.samples_per_second / tone_hz;

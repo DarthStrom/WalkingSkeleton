@@ -90,7 +90,7 @@ unsafe fn clear_sound_buffer(sound_output: &SoundOutput) {
     let mut region1_size = zeroed();
     let mut region2 = zeroed();
     let mut region2_size = zeroed();
-    if (*GLOBAL_SOUND_BUFFER).Lock(
+    match (*GLOBAL_SOUND_BUFFER).Lock(
         0,
         sound_output.sound_buffer_size,
         &mut region1,
@@ -98,21 +98,21 @@ unsafe fn clear_sound_buffer(sound_output: &SoundOutput) {
         &mut region2,
         &mut region2_size,
         0,
-    ) == DS_OK
-    {
-        let mut dest_sample = region1 as *mut u8;
-        for _ in 0..region1_size {
-            *dest_sample = 0;
-            dest_sample = dest_sample.wrapping_offset(1);
+    ) {
+        DS_OK => {
+            let mut dest_sample = region1 as *mut u8;
+            for _ in 0..region1_size {
+                *dest_sample = 0;
+                dest_sample = dest_sample.wrapping_offset(1);
+            }
+            dest_sample = region2 as *mut u8;
+            for _ in 0..region2_size {
+                *dest_sample = 0;
+                dest_sample = dest_sample.wrapping_offset(1);
+            }
+            (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
         }
-        dest_sample = region2 as *mut u8;
-        for _ in 0..region2_size {
-            *dest_sample = 0;
-            dest_sample = dest_sample.wrapping_offset(1);
-        }
-        (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
-    } else {
-        eprintln!("Could not lock the sound buffer to clear it.");
+        e => error!("Could not lock the sound buffer to clear it: {:x}", e),
     }
 }
 
@@ -120,13 +120,13 @@ unsafe fn fill_sound_buffer(
     sound_output: &mut SoundOutput,
     byte_to_lock: u32,
     bytes_to_write: u32,
-    source_buffer: &GameSoundOutputBuffer,
+    source_buffer: &mut GameSoundOutputBuffer,
 ) {
     let mut region1 = zeroed();
     let mut region1_size = zeroed();
     let mut region2 = zeroed();
     let mut region2_size = zeroed();
-    if (*GLOBAL_SOUND_BUFFER).Lock(
+    match (*GLOBAL_SOUND_BUFFER).Lock(
         byte_to_lock,
         bytes_to_write,
         &mut region1,
@@ -134,37 +134,34 @@ unsafe fn fill_sound_buffer(
         &mut region2,
         &mut region2_size,
         0,
-    ) == DS_OK
-    {
-        let region1_sample_count = region1_size / sound_output.bytes_per_sample;
-        let mut source_sample = source_buffer.samples;
-        let mut dest_sample = region1 as *mut i16;
-        for _ in 0..region1_sample_count {
-            *dest_sample = *source_sample;
-            dest_sample = dest_sample.offset(1);
-            source_sample = source_sample.offset(1);
-
-            *dest_sample = *source_sample;
-            dest_sample = dest_sample.offset(1);
-            source_sample = source_sample.offset(1);
-
-            sound_output.running_sample_index += 1;
+    ) {
+        DS_OK => {
+            let region1_sample_count = region1_size / sound_output.bytes_per_sample;
+            let mut source_sample = source_buffer.samples;
+            let mut dest_sample = region1 as *mut i16;
+            for _ in 0..region1_sample_count {
+                *dest_sample = *source_sample;
+                dest_sample = dest_sample.offset(1);
+                source_sample = source_sample.offset(1);
+                *dest_sample = *source_sample;
+                dest_sample = dest_sample.offset(1);
+                source_sample = source_sample.offset(1);
+                sound_output.running_sample_index += 1;
+            }
+            let region2_sample_count = region2_size / sound_output.bytes_per_sample;
+            dest_sample = region2 as *mut i16;
+            for _ in 0..region2_sample_count {
+                *dest_sample = *source_sample;
+                dest_sample = dest_sample.offset(1);
+                source_sample = source_sample.offset(1);
+                *dest_sample = *source_sample;
+                dest_sample = dest_sample.offset(1);
+                source_sample = source_sample.offset(1);
+                sound_output.running_sample_index += 1;
+            }
+            (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
         }
-        let region2_sample_count = region2_size / sound_output.bytes_per_sample;
-        dest_sample = region2 as *mut i16;
-        for _ in 0..region2_sample_count {
-            *dest_sample = *source_sample;
-            dest_sample = dest_sample.offset(1);
-            source_sample = source_sample.offset(1);
-
-            *dest_sample = *source_sample;
-            dest_sample = dest_sample.offset(1);
-            source_sample = source_sample.offset(1);
-
-            sound_output.running_sample_index += 1;
-        }
-
-        (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
+        e => error!("Could not lock sound buffer for filling: {:x}", e),
     }
 }
 
@@ -172,59 +169,62 @@ unsafe fn fill_sound_buffer(
 // waiting on https://github.com/retep998/winapi-rs/pull/602
 unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: u32) {
     let mut direct_sound_ptr: LPDIRECTSOUND = zeroed();
-    if DirectSoundCreate(null_mut(), &mut direct_sound_ptr, null_mut()) == DS_OK {
-        let direct_sound = &*direct_sound_ptr;
+    match DirectSoundCreate(null_mut(), &mut direct_sound_ptr, null_mut()) {
+        DS_OK => {
+            let direct_sound = &*direct_sound_ptr;
 
-        let bits_per_sample = 16;
-        let channels = 2;
-        let block_alignment = channels * bits_per_sample / 8;
-        let mut wave_format = WAVEFORMATEX {
-            wFormatTag: WAVE_FORMAT_PCM,
-            nChannels: channels,
-            nSamplesPerSec: samples_per_second,
-            nAvgBytesPerSec: samples_per_second * block_alignment as u32,
-            nBlockAlign: block_alignment,
-            wBitsPerSample: bits_per_sample,
-            cbSize: 0,
-        };
+            let bits_per_sample = 16;
+            let channels = 2;
+            let block_alignment = channels * bits_per_sample / 8;
+            let mut wave_format = WAVEFORMATEX {
+                wFormatTag: WAVE_FORMAT_PCM,
+                nChannels: channels,
+                nSamplesPerSec: samples_per_second,
+                nAvgBytesPerSec: samples_per_second * block_alignment as u32,
+                nBlockAlign: block_alignment,
+                wBitsPerSample: bits_per_sample,
+                cbSize: 0,
+            };
 
-        if direct_sound.SetCooperativeLevel(window, DSSCL_PRIORITY) == DS_OK {
+            match direct_sound.SetCooperativeLevel(window, DSSCL_PRIORITY) {
+                DS_OK => {
+                    let mut buffer_description: DSBUFFERDESC = zeroed();
+                    buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
+                    buffer_description.dwFlags = DSBCAPS_PRIMARYBUFFER;
+                    let mut primary_buffer: LPDIRECTSOUNDBUFFER = zeroed();
+
+                    match direct_sound.CreateSoundBuffer(
+                        &buffer_description,
+                        &mut primary_buffer,
+                        null_mut(),
+                    ) {
+                        DS_OK => match (*primary_buffer).SetFormat(&wave_format) {
+                            DS_OK => info!("Successfully set the wave format"),
+                            e => error!("Couldn't set the wave format: {:x}", e),
+                        },
+                        e => error!("Couldn't create the primary sound buffer: {:x}", e),
+                    }
+                }
+                e => error!("Couldn't set the cooperative level: {:x}", e),
+            }
+
             let mut buffer_description: DSBUFFERDESC = zeroed();
             buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
-            buffer_description.dwFlags = DSBCAPS_PRIMARYBUFFER;
-            let mut primary_buffer: LPDIRECTSOUNDBUFFER = zeroed();
-
-            if direct_sound.CreateSoundBuffer(&buffer_description, &mut primary_buffer, null_mut())
-                == DS_OK
-            {
-                if (*primary_buffer).SetFormat(&wave_format) != DS_OK {
-                    // TODO: diagnostic - couldn't set the format
-                }
-            } else {
-                // TODO: diagnostic - couldn't create primary sound buffer
+            buffer_description.dwFlags = DSBCAPS_GETCURRENTPOSITION2;
+            buffer_description.dwBufferBytes = buffer_size;
+            buffer_description.lpwfxFormat = &mut wave_format;
+            match direct_sound.CreateSoundBuffer(
+                &buffer_description,
+                &mut GLOBAL_SOUND_BUFFER,
+                null_mut(),
+            ) {
+                DS_OK => info!("Secondary buffer created successfully"),
+                e => error!("Couldn't create the secondary sound buffer: {:x}", e),
             }
-        } else {
-            // TODO: diagnostic - couldn't set the cooperative level
         }
-
-        let mut buffer_description: DSBUFFERDESC = zeroed();
-        buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
-        buffer_description.dwFlags = DSBCAPS_GETCURRENTPOSITION2;
-        buffer_description.dwBufferBytes = buffer_size;
-        buffer_description.lpwfxFormat = &mut wave_format;
-
-        match direct_sound.CreateSoundBuffer(
-            &buffer_description,
-            &mut GLOBAL_SOUND_BUFFER,
-            null_mut(),
-        ) {
-            DS_OK => {
-                // println!("secondary buffer created successfully!");
-            }
-            e => println!("error: {}", e),
+        e => {
+            error!("Couldn't create direct sound object: {:x}", e);
         }
-    } else {
-        // TODO: diagnostic - couldn't create direct sound object
     }
 }
 
@@ -463,7 +463,7 @@ pub fn main() {
                             sound_output.wave_period =
                                 sound_output.samples_per_second / sound_output.tone_hz;
                         } else {
-                            // controller is not available
+                            trace!("controller is not available");
                         }
                     }
 
@@ -471,29 +471,33 @@ pub fn main() {
                     let mut bytes_to_write = 0;
                     let mut play_cursor = 0;
                     let mut write_cursor = 0;
-                    let sound_is_valid = if (*GLOBAL_SOUND_BUFFER)
+                    let sound_is_valid = match (*GLOBAL_SOUND_BUFFER)
                         .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
-                        == DS_OK
                     {
-                        byte_to_lock = (sound_output.running_sample_index
-                            * sound_output.bytes_per_sample)
-                            % sound_output.sound_buffer_size;
+                        DS_OK => {
+                            byte_to_lock = (sound_output.running_sample_index
+                                * sound_output.bytes_per_sample)
+                                % sound_output.sound_buffer_size;
 
-                        let target_cursor = (play_cursor
-                            + (sound_output.latency_sample_count * sound_output.bytes_per_sample))
-                            % sound_output.sound_buffer_size;
-                        bytes_to_write = if byte_to_lock > target_cursor {
-                            (sound_output.sound_buffer_size - byte_to_lock) + target_cursor
-                        } else {
-                            target_cursor - byte_to_lock
-                        };
+                            let target_cursor = (play_cursor
+                                + (sound_output.latency_sample_count
+                                    * sound_output.bytes_per_sample))
+                                % sound_output.sound_buffer_size;
+                            bytes_to_write = if byte_to_lock > target_cursor {
+                                (sound_output.sound_buffer_size - byte_to_lock) + target_cursor
+                            } else {
+                                target_cursor - byte_to_lock
+                            };
 
-                        true
-                    } else {
-                        false
+                            true
+                        }
+                        e => {
+                            error!("Could not get sound cursor position: {:x}", e);
+                            false
+                        }
                     };
 
-                    let sound_buffer = GameSoundOutputBuffer {
+                    let mut sound_buffer = GameSoundOutputBuffer {
                         samples_per_second: sound_output.samples_per_second,
                         sample_count: sound_output.samples_per_second / 30,
                         samples,
@@ -515,12 +519,12 @@ pub fn main() {
                     );
 
                     // direct sound output test
-                    if sound_is_valid {
+                    if sound_is_valid && bytes_to_write > 0 {
                         fill_sound_buffer(
                             &mut sound_output,
                             byte_to_lock,
                             bytes_to_write,
-                            &sound_buffer,
+                            &mut sound_buffer,
                         );
                     }
 
@@ -536,7 +540,7 @@ pub fn main() {
                     QueryPerformanceCounter(&mut end_counter);
 
                     let counter_elapsed = end_counter.QuadPart() - last_counter.QuadPart();
-                    println!(
+                    trace!(
                         "{}ms/f / {}f/s",
                         1000 * counter_elapsed / performance_count_frequency,
                         performance_count_frequency / counter_elapsed
@@ -545,10 +549,10 @@ pub fn main() {
                     last_counter = end_counter;
                 }
             } else {
-                // TODO: logging
+                error!("Window wasn't created");
             }
         } else {
-            // TODO: logging
+            error!("Couldn't register window class");
         }
     }
 }

@@ -3,6 +3,9 @@ use std::f32::{self, consts::PI};
 use winapi::ctypes::c_void;
 
 static mut T_SINE: f32 = 0.0;
+static mut BLUE_OFFSET: i32 = 0;
+static mut GREEN_OFFSET: i32 = 0;
+static mut TONE_HZ: u32 = 256;
 
 pub struct OffscreenBuffer {
     pub memory: *mut c_void,
@@ -12,31 +15,69 @@ pub struct OffscreenBuffer {
     pub bytes_per_pixel: i32,
 }
 
-pub struct GameSoundOutputBuffer {
+pub struct SoundOutputBuffer {
     pub samples_per_second: u32,
     pub sample_count: u32,
     // IMPORTANT: samples must be padded to a multiple of 4
     pub samples: *mut i16,
 }
 
+pub struct ButtonState {
+    pub half_transition_count: i32,
+    pub ended_down: bool,
+}
+
+pub struct ControllerInput {
+    pub is_analog: bool,
+    pub start_x: f32,
+    pub start_y: f32,
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+    pub end_x: f32,
+    pub end_y: f32,
+    pub up: ButtonState,
+    pub down: ButtonState,
+    pub left: ButtonState,
+    pub right: ButtonState,
+    pub left_shoulder: ButtonState,
+    pub right_shoulder: ButtonState,
+}
+
+pub struct Input {
+    pub controllers: [ControllerInput; 4],
+}
+
 // TODO: services that the platform layer provides to the game
 
 // services that the game provides to the platform layer
-pub fn game_update_and_render(
+pub fn update_and_render(
+    input: &Input,
     buffer: &OffscreenBuffer,
-    blue_offset: i32,
-    green_offset: i32,
-    sound_buffer: &GameSoundOutputBuffer,
-    tone_hz: u32,
+    sound_buffer: &SoundOutputBuffer,
 ) {
+    let input0 = &input.controllers[0];
     unsafe {
-        game_output_sound(sound_buffer, tone_hz);
-        render_weird_gradient(buffer, blue_offset, green_offset)
+        if input0.is_analog {
+            // use analog movement tuning
+            BLUE_OFFSET += (4.0 * input0.end_x) as i32;
+            TONE_HZ = (256.0 + 128.0 * input0.end_y) as u32;
+        } else {
+            // use digital movement tuning
+        }
+
+        if input0.down.ended_down {
+            GREEN_OFFSET += 1;
+        }
+
+        output_sound(sound_buffer, TONE_HZ);
+        render_weird_gradient(buffer, BLUE_OFFSET, GREEN_OFFSET)
     };
 }
 
 // TODO: platform independent code should get priority for removing unsafe
-unsafe fn game_output_sound(sound_buffer: &GameSoundOutputBuffer, tone_hz: u32) {
+unsafe fn output_sound(sound_buffer: &SoundOutputBuffer, tone_hz: u32) {
     let tone_volume = 3_000.0;
     let wave_period = sound_buffer.samples_per_second / tone_hz;
 

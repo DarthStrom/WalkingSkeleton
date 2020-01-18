@@ -1,8 +1,8 @@
-use crate::game::{game_update_and_render, GameSoundOutputBuffer, OffscreenBuffer};
-use std::{f32, ffi::OsStr, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
+use crate::game;
+use std::{ffi::OsStr, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
     ctypes::c_void,
-    shared::{minwindef::LRESULT, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
+    shared::{minwindef::LRESULT, minwindef::*, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
     um::{
         dsound::*, libloaderapi::GetModuleHandleW, memoryapi::*, profileapi::*, wingdi::*,
         winnt::*, winuser::*, xinput::*,
@@ -19,7 +19,7 @@ const VK_D: i32 = 'D' as i32;
 const VK_Q: i32 = 'Q' as i32;
 const VK_E: i32 = 'E' as i32;
 
-struct Win32OffscreenBuffer {
+struct OffscreenBuffer {
     info: BITMAPINFO,
     memory: *mut c_void,
     width: i32,
@@ -28,9 +28,22 @@ struct Win32OffscreenBuffer {
     bytes_per_pixel: i32,
 }
 
+struct WindowDimension {
+    width: i32,
+    height: i32,
+}
+
+struct SoundOutput {
+    running_sample_index: u32,
+    bytes_per_sample: u32,
+    sound_buffer_size: u32,
+    samples_per_second: u32,
+    latency_sample_count: u32,
+}
+
 static mut GLOBAL_RUNNING: bool = true;
 static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
-static mut GLOBAL_BACK_BUFFER: Win32OffscreenBuffer = Win32OffscreenBuffer {
+static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     info: BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: 0,
@@ -59,110 +72,8 @@ static mut GLOBAL_BACK_BUFFER: Win32OffscreenBuffer = Win32OffscreenBuffer {
     bytes_per_pixel: 4,
 };
 
-struct WindowDimension {
-    width: i32,
-    height: i32,
-}
-
-fn get_window_dimension(window: HWND) -> WindowDimension {
-    let mut client_rect = RECT::default();
-    unsafe {
-        GetClientRect(window, &mut client_rect);
-    }
-    WindowDimension {
-        width: client_rect.right - client_rect.left,
-        height: client_rect.bottom - client_rect.top,
-    }
-}
-
-struct SoundOutput {
-    tone_hz: u32,
-    running_sample_index: u32,
-    wave_period: u32,
-    bytes_per_sample: u32,
-    sound_buffer_size: u32,
-    samples_per_second: u32,
-    latency_sample_count: u32,
-}
-
-unsafe fn clear_sound_buffer(sound_output: &SoundOutput) {
-    let mut region1 = zeroed();
-    let mut region1_size = zeroed();
-    let mut region2 = zeroed();
-    let mut region2_size = zeroed();
-    match (*GLOBAL_SOUND_BUFFER).Lock(
-        0,
-        sound_output.sound_buffer_size,
-        &mut region1,
-        &mut region1_size,
-        &mut region2,
-        &mut region2_size,
-        0,
-    ) {
-        DS_OK => {
-            let mut dest_sample = region1 as *mut u8;
-            for _ in 0..region1_size {
-                *dest_sample = 0;
-                dest_sample = dest_sample.wrapping_offset(1);
-            }
-            dest_sample = region2 as *mut u8;
-            for _ in 0..region2_size {
-                *dest_sample = 0;
-                dest_sample = dest_sample.wrapping_offset(1);
-            }
-            (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
-        }
-        e => error!("Could not lock the sound buffer to clear it: {:x}", e),
-    }
-}
-
-unsafe fn fill_sound_buffer(
-    sound_output: &mut SoundOutput,
-    byte_to_lock: u32,
-    bytes_to_write: u32,
-    source_buffer: &mut GameSoundOutputBuffer,
-) {
-    let mut region1 = zeroed();
-    let mut region1_size = zeroed();
-    let mut region2 = zeroed();
-    let mut region2_size = zeroed();
-    match (*GLOBAL_SOUND_BUFFER).Lock(
-        byte_to_lock,
-        bytes_to_write,
-        &mut region1,
-        &mut region1_size,
-        &mut region2,
-        &mut region2_size,
-        0,
-    ) {
-        DS_OK => {
-            let region1_sample_count = region1_size / sound_output.bytes_per_sample;
-            let mut source_sample = source_buffer.samples;
-            let mut dest_sample = region1 as *mut i16;
-            for _ in 0..region1_sample_count {
-                *dest_sample = *source_sample;
-                dest_sample = dest_sample.offset(1);
-                source_sample = source_sample.offset(1);
-                *dest_sample = *source_sample;
-                dest_sample = dest_sample.offset(1);
-                source_sample = source_sample.offset(1);
-                sound_output.running_sample_index += 1;
-            }
-            let region2_sample_count = region2_size / sound_output.bytes_per_sample;
-            dest_sample = region2 as *mut i16;
-            for _ in 0..region2_sample_count {
-                *dest_sample = *source_sample;
-                dest_sample = dest_sample.offset(1);
-                source_sample = source_sample.offset(1);
-                *dest_sample = *source_sample;
-                dest_sample = dest_sample.offset(1);
-                source_sample = source_sample.offset(1);
-                sound_output.running_sample_index += 1;
-            }
-            (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
-        }
-        e => error!("Could not lock sound buffer for filling: {:x}", e),
-    }
+fn win32_string(value: &str) -> Vec<u16> {
+    OsStr::new(value).encode_wide().chain(once(0)).collect()
 }
 
 // TODO: investigate XAudio2
@@ -228,7 +139,18 @@ unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: 
     }
 }
 
-unsafe fn resize_dib_section(buffer: &mut Win32OffscreenBuffer, width: i32, height: i32) {
+fn get_window_dimension(window: HWND) -> WindowDimension {
+    let mut client_rect = RECT::default();
+    unsafe {
+        GetClientRect(window, &mut client_rect);
+    }
+    WindowDimension {
+        width: client_rect.right - client_rect.left,
+        height: client_rect.bottom - client_rect.top,
+    }
+}
+
+unsafe fn resize_dib_section(buffer: &mut OffscreenBuffer, width: i32, height: i32) {
     if !buffer.memory.is_null() {
         VirtualFree(buffer.memory, 0, MEM_RELEASE);
     }
@@ -255,7 +177,7 @@ unsafe fn resize_dib_section(buffer: &mut Win32OffscreenBuffer, width: i32, heig
 }
 
 unsafe fn display_buffer_in_window(
-    buffer: &Win32OffscreenBuffer,
+    buffer: &OffscreenBuffer,
     device_context: HDC,
     window_width: i32,
     window_height: i32,
@@ -287,7 +209,7 @@ unsafe extern "system" fn main_window_callback(
     let dimension = get_window_dimension(window);
 
     match message {
-        WM_ACTIVATEAPP => {}
+        WM_ACTIVATEAPP => trace!("WM_ACTIVATEAPP"),
         WM_CLOSE | WM_DESTROY => GLOBAL_RUNNING = false,
         WM_KEYUP | WM_KEYDOWN => {
             let vk_code = w_param as i32;
@@ -296,18 +218,24 @@ unsafe extern "system" fn main_window_callback(
 
             if was_down != is_down {
                 match vk_code {
-                    VK_W => println!("W"),
-                    VK_A => println!("A"),
-                    VK_S => println!("S"),
-                    VK_D => println!("D"),
-                    VK_Q => println!("Q"),
-                    VK_E => println!("E"),
-                    VK_UP => println!("up"),
-                    VK_LEFT => println!("left"),
-                    VK_DOWN => println!("down"),
-                    VK_RIGHT => println!("right"),
-                    VK_ESCAPE => println!("escape"),
-                    VK_SPACE => println!("space"),
+                    VK_W => trace!("W"),
+                    VK_A => trace!("A"),
+                    VK_S => trace!("S"),
+                    VK_D => trace!("D"),
+                    VK_Q => trace!("Q"),
+                    VK_E => trace!("E"),
+                    VK_UP => trace!("up"),
+                    VK_LEFT => trace!("LEFT"),
+                    VK_DOWN => trace!("DOWN"),
+                    VK_RIGHT => trace!("RIGHT"),
+                    VK_ESCAPE => {
+                        trace!(
+                            "ESCAPE: {}{}",
+                            if is_down { " IsDown" } else { "" },
+                            if was_down { " WasDown" } else { "" }
+                        );
+                    }
+                    VK_SPACE => trace!("SPACE"),
                     _ => {}
                 };
             }
@@ -325,6 +253,7 @@ unsafe extern "system" fn main_window_callback(
         }
         WM_SIZE => {}
         _ => {
+            trace!("default");
             result = DefWindowProcW(window, message, w_param, l_param);
         }
     }
@@ -332,8 +261,98 @@ unsafe extern "system" fn main_window_callback(
     result
 }
 
-fn win32_string(value: &str) -> Vec<u16> {
-    OsStr::new(value).encode_wide().chain(once(0)).collect()
+unsafe fn clear_sound_buffer(sound_output: &SoundOutput) {
+    let mut region1 = zeroed();
+    let mut region1_size = zeroed();
+    let mut region2 = zeroed();
+    let mut region2_size = zeroed();
+    match (*GLOBAL_SOUND_BUFFER).Lock(
+        0,
+        sound_output.sound_buffer_size,
+        &mut region1,
+        &mut region1_size,
+        &mut region2,
+        &mut region2_size,
+        0,
+    ) {
+        DS_OK => {
+            let mut dest_sample = region1 as *mut u8;
+            for _ in 0..region1_size {
+                *dest_sample = 0;
+                dest_sample = dest_sample.wrapping_offset(1);
+            }
+            dest_sample = region2 as *mut u8;
+            for _ in 0..region2_size {
+                *dest_sample = 0;
+                dest_sample = dest_sample.wrapping_offset(1);
+            }
+            (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
+        }
+        e => error!("Could not lock the sound buffer to clear it: {:x}", e),
+    }
+}
+
+fn process_xinput_digital_button(
+    xinput_button_state: WORD,
+    old_state: &game::ButtonState,
+    button_bit: WORD,
+    new_state: &mut game::ButtonState,
+) {
+    new_state.ended_down = (xinput_button_state & button_bit) == button_bit;
+    new_state.half_transition_count = if old_state.ended_down != new_state.ended_down {
+        1
+    } else {
+        0
+    };
+}
+
+unsafe fn fill_sound_buffer(
+    sound_output: &mut SoundOutput,
+    byte_to_lock: u32,
+    bytes_to_write: u32,
+    source_buffer: &mut game::SoundOutputBuffer,
+) {
+    let mut region1 = zeroed();
+    let mut region1_size = zeroed();
+    let mut region2 = zeroed();
+    let mut region2_size = zeroed();
+    match (*GLOBAL_SOUND_BUFFER).Lock(
+        byte_to_lock,
+        bytes_to_write,
+        &mut region1,
+        &mut region1_size,
+        &mut region2,
+        &mut region2_size,
+        0,
+    ) {
+        DS_OK => {
+            let region1_sample_count = region1_size / sound_output.bytes_per_sample;
+            let mut source_sample = source_buffer.samples;
+            let mut dest_sample = region1 as *mut i16;
+            for _ in 0..region1_sample_count {
+                *dest_sample = *source_sample;
+                dest_sample = dest_sample.offset(1);
+                source_sample = source_sample.offset(1);
+                *dest_sample = *source_sample;
+                dest_sample = dest_sample.offset(1);
+                source_sample = source_sample.offset(1);
+                sound_output.running_sample_index += 1;
+            }
+            let region2_sample_count = region2_size / sound_output.bytes_per_sample;
+            dest_sample = region2 as *mut i16;
+            for _ in 0..region2_sample_count {
+                *dest_sample = *source_sample;
+                dest_sample = dest_sample.offset(1);
+                source_sample = source_sample.offset(1);
+                *dest_sample = *source_sample;
+                dest_sample = dest_sample.offset(1);
+                source_sample = source_sample.offset(1);
+                sound_output.running_sample_index += 1;
+            }
+            (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
+        }
+        e => error!("Could not lock sound buffer for filling: {:x}", e),
+    }
 }
 
 pub fn main() {
@@ -376,26 +395,18 @@ pub fn main() {
             if !window.is_null() {
                 let device_context = GetDC(window);
 
-                // graphics test
-                let mut x_offset = 0;
-                let mut y_offset = 0;
-
                 // sound test
                 let samples_per_second = 48_000;
-                let tone_hz = 256;
                 let bytes_per_sample = (size_of::<i16>() * 2) as u32;
                 let sound_buffer_size = samples_per_second * bytes_per_sample as u32;
                 let latency_sample_count = samples_per_second / 10;
                 let mut sound_output = SoundOutput {
-                    tone_hz,
                     running_sample_index: 0,
-                    wave_period: samples_per_second / tone_hz,
                     bytes_per_sample,
                     sound_buffer_size,
                     samples_per_second,
                     latency_sample_count,
                 };
-
                 init_direct_sound(
                     window,
                     sound_output.samples_per_second,
@@ -417,6 +428,9 @@ pub fn main() {
                     PAGE_READWRITE,
                 ) as *mut i16;
 
+                let mut new_input: game::Input = zeroed();
+                let old_input: game::Input = zeroed();
+
                 let mut last_counter: LARGE_INTEGER = zeroed();
                 QueryPerformanceCounter(&mut last_counter);
                 while GLOBAL_RUNNING {
@@ -432,36 +446,92 @@ pub fn main() {
                     }
 
                     // TODO: should we poll this more frequently?
-                    for controller_index in 0..XUSER_MAX_COUNT {
+                    let mut max_controller_count = XUSER_MAX_COUNT as usize;
+                    if max_controller_count > new_input.controllers.len() {
+                        max_controller_count = new_input.controllers.len()
+                    }
+
+                    for controller_index in 0..max_controller_count {
+                        let old_controller = &old_input.controllers[controller_index];
+                        let mut new_controller = &mut new_input.controllers[controller_index];
+
                         let mut controller_state: XINPUT_STATE = zeroed();
-                        if XInputGetState(controller_index, &mut controller_state) == ERROR_SUCCESS
+                        if XInputGetState(controller_index as u32, &mut controller_state)
+                            == ERROR_SUCCESS
                         {
                             // controller is plugged in
                             let pad = controller_state.Gamepad;
 
+                            // TODO: DPad
                             let _up = pad.wButtons & XINPUT_GAMEPAD_DPAD_UP > 0;
                             let _down = pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN > 0;
                             let _left = pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT > 0;
                             let _right = pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT > 0;
-                            let _start = pad.wButtons & XINPUT_GAMEPAD_START > 0;
-                            let _back = pad.wButtons & XINPUT_GAMEPAD_BACK > 0;
-                            let _left_shoulder = pad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER > 0;
-                            let _right_shoulder = pad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER > 0;
-                            let _a_button = pad.wButtons & XINPUT_GAMEPAD_A > 0;
-                            let _b_button = pad.wButtons & XINPUT_GAMEPAD_B > 0;
-                            let _x_button = pad.wButtons & XINPUT_GAMEPAD_X > 0;
-                            let _y_button = pad.wButtons & XINPUT_GAMEPAD_Y > 0;
 
-                            let stick_x = pad.sThumbLX;
-                            let stick_y = pad.sThumbLY;
+                            new_controller.is_analog = true;
+                            new_controller.start_x = old_controller.end_x;
+                            new_controller.start_y = old_controller.end_y;
 
-                            x_offset += stick_x as i32 / 4096;
-                            y_offset += stick_y as i32 / 4096;
+                            // TODO: Dead zone processing
+                            // XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE
+                            // XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE
 
-                            sound_output.tone_hz =
-                                (512.0 + (256.0 * (stick_y as f32 / 30_000.0))) as u32;
-                            sound_output.wave_period =
-                                sound_output.samples_per_second / sound_output.tone_hz;
+                            // TODO: Min/Max macros
+                            // TODO: Collapse to single function
+                            let x = if pad.sThumbLX < 0 {
+                                pad.sThumbLX as f32 / 32768.0
+                            } else {
+                                pad.sThumbLX as f32 / 32767.0
+                            };
+                            new_controller.min_x = x;
+                            new_controller.max_x = x;
+                            new_controller.end_x = x;
+
+                            let y = if pad.sThumbLY < 0 {
+                                pad.sThumbLY as f32 / 32768.0
+                            } else {
+                                pad.sThumbLY as f32 / 32767.0
+                            };
+                            new_controller.min_y = y;
+                            new_controller.max_y = y;
+                            new_controller.end_y = y;
+
+                            process_xinput_digital_button(
+                                pad.wButtons,
+                                &old_controller.right,
+                                XINPUT_GAMEPAD_A,
+                                &mut new_controller.right,
+                            );
+                            process_xinput_digital_button(
+                                pad.wButtons,
+                                &old_controller.down,
+                                XINPUT_GAMEPAD_B,
+                                &mut new_controller.down,
+                            );
+                            process_xinput_digital_button(
+                                pad.wButtons,
+                                &old_controller.up,
+                                XINPUT_GAMEPAD_X,
+                                &mut new_controller.up,
+                            );
+                            process_xinput_digital_button(
+                                pad.wButtons,
+                                &old_controller.left,
+                                XINPUT_GAMEPAD_Y,
+                                &mut new_controller.left,
+                            );
+                            process_xinput_digital_button(
+                                pad.wButtons,
+                                &old_controller.left_shoulder,
+                                XINPUT_GAMEPAD_LEFT_SHOULDER,
+                                &mut new_controller.left_shoulder,
+                            );
+                            process_xinput_digital_button(
+                                pad.wButtons,
+                                &old_controller.right_shoulder,
+                                XINPUT_GAMEPAD_RIGHT_SHOULDER,
+                                &mut new_controller.right_shoulder,
+                            );
                         } else {
                             trace!("controller is not available");
                         }
@@ -497,26 +567,20 @@ pub fn main() {
                         }
                     };
 
-                    let mut sound_buffer = GameSoundOutputBuffer {
+                    let mut sound_buffer = game::SoundOutputBuffer {
                         samples_per_second: sound_output.samples_per_second,
-                        sample_count: sound_output.samples_per_second / 30,
+                        sample_count: bytes_to_write / sound_output.bytes_per_sample,
                         samples,
                     };
 
-                    let buffer = OffscreenBuffer {
+                    let buffer = game::OffscreenBuffer {
                         memory: GLOBAL_BACK_BUFFER.memory,
                         width: GLOBAL_BACK_BUFFER.width,
                         height: GLOBAL_BACK_BUFFER.height,
                         pitch: GLOBAL_BACK_BUFFER.pitch,
                         bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
                     };
-                    game_update_and_render(
-                        &buffer,
-                        x_offset,
-                        y_offset,
-                        &sound_buffer,
-                        sound_output.tone_hz,
-                    );
+                    game::update_and_render(&new_input, &buffer, &sound_buffer);
 
                     // direct sound output test
                     if sound_is_valid && bytes_to_write > 0 {

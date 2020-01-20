@@ -76,6 +76,22 @@ fn win32_string(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(once(0)).collect()
 }
 
+fn kilobytes(bytes: usize) -> usize {
+    bytes * 1024
+}
+
+fn megabytes(bytes: usize) -> usize {
+    1024 * kilobytes(bytes)
+}
+
+fn gigabytes(bytes: usize) -> usize {
+    1024 * megabytes(bytes)
+}
+
+fn terabytes(bytes: usize) -> usize {
+    1024 * gigabytes(bytes)
+}
+
 // TODO: investigate XAudio2
 // waiting on https://github.com/retep998/winapi-rs/pull/602
 unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: u32) {
@@ -292,20 +308,6 @@ unsafe fn clear_sound_buffer(sound_output: &SoundOutput) {
     }
 }
 
-fn process_xinput_digital_button(
-    xinput_button_state: WORD,
-    old_state: &game::ButtonState,
-    button_bit: WORD,
-    new_state: &mut game::ButtonState,
-) {
-    new_state.ended_down = (xinput_button_state & button_bit) == button_bit;
-    new_state.half_transition_count = if old_state.ended_down != new_state.ended_down {
-        1
-    } else {
-        0
-    };
-}
-
 unsafe fn fill_sound_buffer(
     sound_output: &mut SoundOutput,
     byte_to_lock: u32,
@@ -353,6 +355,20 @@ unsafe fn fill_sound_buffer(
         }
         e => error!("Could not lock sound buffer for filling: {:x}", e),
     }
+}
+
+fn process_xinput_digital_button(
+    xinput_button_state: WORD,
+    old_state: &game::ButtonState,
+    button_bit: WORD,
+    new_state: &mut game::ButtonState,
+) {
+    new_state.ended_down = (xinput_button_state & button_bit) == button_bit;
+    new_state.half_transition_count = if old_state.ended_down != new_state.ended_down {
+        1
+    } else {
+        0
+    };
 }
 
 pub fn main() {
@@ -421,196 +437,236 @@ pub fn main() {
                 // TODO: Pool with bitmap virtualalloc
                 // remove max_possible_overrun?
                 let max_possible_overrun = 2 * 8 * size_of::<u16>() as u32;
-                let samples: *mut i16 = VirtualAlloc(
+                let samples = VirtualAlloc(
                     null_mut(),
                     (sound_output.sound_buffer_size + max_possible_overrun) as usize,
                     MEM_RESERVE | MEM_COMMIT,
                     PAGE_READWRITE,
                 ) as *mut i16;
 
-                let mut new_input: game::Input = zeroed();
-                let old_input: game::Input = zeroed();
+                let base_address: LPVOID = if cfg!(debug_assertions) {
+                    null_mut::<VOID>().wrapping_add(terabytes(2))
+                } else {
+                    null_mut::<VOID>()
+                };
+                let mut game_memory: game::Memory = zeroed();
+                game_memory.permanent_storage_size = megabytes(64);
+                game_memory.transient_storage_size = gigabytes(4);
 
-                let mut last_counter: LARGE_INTEGER = zeroed();
-                QueryPerformanceCounter(&mut last_counter);
-                while GLOBAL_RUNNING {
-                    let mut message = zeroed();
+                let total_size =
+                    game_memory.permanent_storage_size + game_memory.transient_storage_size;
+                game_memory.permanent_storage = VirtualAlloc(
+                    base_address,
+                    total_size,
+                    MEM_RESERVE | MEM_COMMIT,
+                    PAGE_READWRITE,
+                ) as *mut u8;
+                game_memory.transient_storage = game_memory
+                    .permanent_storage
+                    .wrapping_add(game_memory.permanent_storage_size);
 
-                    while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
-                        if message.message == WM_QUIT {
-                            GLOBAL_RUNNING = false;
+                if !samples.is_null()
+                    && !game_memory.permanent_storage.is_null()
+                    && !game_memory.transient_storage.is_null()
+                {
+                    let mut new_input: game::Input = zeroed();
+                    let mut old_input: game::Input = zeroed();
+
+                    let mut last_counter: LARGE_INTEGER = zeroed();
+                    QueryPerformanceCounter(&mut last_counter);
+                    while GLOBAL_RUNNING {
+                        let mut message = zeroed();
+
+                        while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+                            if message.message == WM_QUIT {
+                                GLOBAL_RUNNING = false;
+                            }
+
+                            TranslateMessage(&message);
+                            DispatchMessageW(&message);
                         }
 
-                        TranslateMessage(&message);
-                        DispatchMessageW(&message);
-                    }
+                        // TODO: should we poll this more frequently?
+                        let mut max_controller_count = XUSER_MAX_COUNT as usize;
+                        if max_controller_count > new_input.controllers.len() {
+                            max_controller_count = new_input.controllers.len()
+                        }
 
-                    // TODO: should we poll this more frequently?
-                    let mut max_controller_count = XUSER_MAX_COUNT as usize;
-                    if max_controller_count > new_input.controllers.len() {
-                        max_controller_count = new_input.controllers.len()
-                    }
+                        for controller_index in 0..max_controller_count {
+                            let old_controller = &old_input.controllers[controller_index];
+                            let mut new_controller = &mut new_input.controllers[controller_index];
 
-                    for controller_index in 0..max_controller_count {
-                        let old_controller = &old_input.controllers[controller_index];
-                        let mut new_controller = &mut new_input.controllers[controller_index];
+                            let mut controller_state: XINPUT_STATE = zeroed();
+                            if XInputGetState(controller_index as u32, &mut controller_state)
+                                == ERROR_SUCCESS
+                            {
+                                // controller is plugged in
+                                let pad = controller_state.Gamepad;
 
-                        let mut controller_state: XINPUT_STATE = zeroed();
-                        if XInputGetState(controller_index as u32, &mut controller_state)
-                            == ERROR_SUCCESS
+                                // TODO: DPad
+                                let _up = pad.wButtons & XINPUT_GAMEPAD_DPAD_UP > 0;
+                                let _down = pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN > 0;
+                                let _left = pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT > 0;
+                                let _right = pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT > 0;
+
+                                new_controller.is_analog = true;
+                                new_controller.start_x = old_controller.end_x;
+                                new_controller.start_y = old_controller.end_y;
+
+                                // TODO: Dead zone processing
+                                // XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE
+                                // XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE
+
+                                // TODO: Min/Max macros
+                                // TODO: Collapse to single function
+                                let x = if pad.sThumbLX < 0 {
+                                    pad.sThumbLX as f32 / 32768.0
+                                } else {
+                                    pad.sThumbLX as f32 / 32767.0
+                                };
+                                new_controller.min_x = x;
+                                new_controller.max_x = x;
+                                new_controller.end_x = x;
+
+                                let y = if pad.sThumbLY < 0 {
+                                    pad.sThumbLY as f32 / 32768.0
+                                } else {
+                                    pad.sThumbLY as f32 / 32767.0
+                                };
+                                new_controller.min_y = y;
+                                new_controller.max_y = y;
+                                new_controller.end_y = y;
+
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &old_controller.right,
+                                    XINPUT_GAMEPAD_A,
+                                    &mut new_controller.right,
+                                );
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &old_controller.down,
+                                    XINPUT_GAMEPAD_B,
+                                    &mut new_controller.down,
+                                );
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &old_controller.up,
+                                    XINPUT_GAMEPAD_X,
+                                    &mut new_controller.up,
+                                );
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &old_controller.left,
+                                    XINPUT_GAMEPAD_Y,
+                                    &mut new_controller.left,
+                                );
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &old_controller.left_shoulder,
+                                    XINPUT_GAMEPAD_LEFT_SHOULDER,
+                                    &mut new_controller.left_shoulder,
+                                );
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &old_controller.right_shoulder,
+                                    XINPUT_GAMEPAD_RIGHT_SHOULDER,
+                                    &mut new_controller.right_shoulder,
+                                );
+                            } else {
+                                trace!("controller is not available");
+                            }
+                        }
+
+                        let mut byte_to_lock = 0;
+                        let mut bytes_to_write = 0;
+                        let mut play_cursor = 0;
+                        let mut write_cursor = 0;
+                        let sound_is_valid = match (*GLOBAL_SOUND_BUFFER)
+                            .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
                         {
-                            // controller is plugged in
-                            let pad = controller_state.Gamepad;
+                            DS_OK => {
+                                byte_to_lock = (sound_output.running_sample_index
+                                    * sound_output.bytes_per_sample)
+                                    % sound_output.sound_buffer_size;
 
-                            // TODO: DPad
-                            let _up = pad.wButtons & XINPUT_GAMEPAD_DPAD_UP > 0;
-                            let _down = pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN > 0;
-                            let _left = pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT > 0;
-                            let _right = pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT > 0;
+                                let target_cursor = (play_cursor
+                                    + (sound_output.latency_sample_count
+                                        * sound_output.bytes_per_sample))
+                                    % sound_output.sound_buffer_size;
+                                bytes_to_write = if byte_to_lock > target_cursor {
+                                    (sound_output.sound_buffer_size - byte_to_lock) + target_cursor
+                                } else {
+                                    target_cursor - byte_to_lock
+                                };
 
-                            new_controller.is_analog = true;
-                            new_controller.start_x = old_controller.end_x;
-                            new_controller.start_y = old_controller.end_y;
+                                true
+                            }
+                            e => {
+                                error!("Could not get sound cursor position: {:x}", e);
+                                false
+                            }
+                        };
 
-                            // TODO: Dead zone processing
-                            // XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE
-                            // XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE
+                        let mut sound_buffer = game::SoundOutputBuffer {
+                            samples_per_second: sound_output.samples_per_second,
+                            sample_count: bytes_to_write / sound_output.bytes_per_sample,
+                            samples,
+                        };
 
-                            // TODO: Min/Max macros
-                            // TODO: Collapse to single function
-                            let x = if pad.sThumbLX < 0 {
-                                pad.sThumbLX as f32 / 32768.0
-                            } else {
-                                pad.sThumbLX as f32 / 32767.0
-                            };
-                            new_controller.min_x = x;
-                            new_controller.max_x = x;
-                            new_controller.end_x = x;
-
-                            let y = if pad.sThumbLY < 0 {
-                                pad.sThumbLY as f32 / 32768.0
-                            } else {
-                                pad.sThumbLY as f32 / 32767.0
-                            };
-                            new_controller.min_y = y;
-                            new_controller.max_y = y;
-                            new_controller.end_y = y;
-
-                            process_xinput_digital_button(
-                                pad.wButtons,
-                                &old_controller.right,
-                                XINPUT_GAMEPAD_A,
-                                &mut new_controller.right,
-                            );
-                            process_xinput_digital_button(
-                                pad.wButtons,
-                                &old_controller.down,
-                                XINPUT_GAMEPAD_B,
-                                &mut new_controller.down,
-                            );
-                            process_xinput_digital_button(
-                                pad.wButtons,
-                                &old_controller.up,
-                                XINPUT_GAMEPAD_X,
-                                &mut new_controller.up,
-                            );
-                            process_xinput_digital_button(
-                                pad.wButtons,
-                                &old_controller.left,
-                                XINPUT_GAMEPAD_Y,
-                                &mut new_controller.left,
-                            );
-                            process_xinput_digital_button(
-                                pad.wButtons,
-                                &old_controller.left_shoulder,
-                                XINPUT_GAMEPAD_LEFT_SHOULDER,
-                                &mut new_controller.left_shoulder,
-                            );
-                            process_xinput_digital_button(
-                                pad.wButtons,
-                                &old_controller.right_shoulder,
-                                XINPUT_GAMEPAD_RIGHT_SHOULDER,
-                                &mut new_controller.right_shoulder,
-                            );
-                        } else {
-                            trace!("controller is not available");
-                        }
-                    }
-
-                    let mut byte_to_lock = 0;
-                    let mut bytes_to_write = 0;
-                    let mut play_cursor = 0;
-                    let mut write_cursor = 0;
-                    let sound_is_valid = match (*GLOBAL_SOUND_BUFFER)
-                        .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
-                    {
-                        DS_OK => {
-                            byte_to_lock = (sound_output.running_sample_index
-                                * sound_output.bytes_per_sample)
-                                % sound_output.sound_buffer_size;
-
-                            let target_cursor = (play_cursor
-                                + (sound_output.latency_sample_count
-                                    * sound_output.bytes_per_sample))
-                                % sound_output.sound_buffer_size;
-                            bytes_to_write = if byte_to_lock > target_cursor {
-                                (sound_output.sound_buffer_size - byte_to_lock) + target_cursor
-                            } else {
-                                target_cursor - byte_to_lock
-                            };
-
-                            true
-                        }
-                        e => {
-                            error!("Could not get sound cursor position: {:x}", e);
-                            false
-                        }
-                    };
-
-                    let mut sound_buffer = game::SoundOutputBuffer {
-                        samples_per_second: sound_output.samples_per_second,
-                        sample_count: bytes_to_write / sound_output.bytes_per_sample,
-                        samples,
-                    };
-
-                    let buffer = game::OffscreenBuffer {
-                        memory: GLOBAL_BACK_BUFFER.memory,
-                        width: GLOBAL_BACK_BUFFER.width,
-                        height: GLOBAL_BACK_BUFFER.height,
-                        pitch: GLOBAL_BACK_BUFFER.pitch,
-                        bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
-                    };
-                    game::update_and_render(&new_input, &buffer, &sound_buffer);
-
-                    // direct sound output test
-                    if sound_is_valid && bytes_to_write > 0 {
-                        fill_sound_buffer(
-                            &mut sound_output,
-                            byte_to_lock,
-                            bytes_to_write,
-                            &mut sound_buffer,
+                        let buffer = game::OffscreenBuffer {
+                            memory: GLOBAL_BACK_BUFFER.memory,
+                            width: GLOBAL_BACK_BUFFER.width,
+                            height: GLOBAL_BACK_BUFFER.height,
+                            pitch: GLOBAL_BACK_BUFFER.pitch,
+                            bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
+                        };
+                        game::update_and_render(
+                            &mut game_memory,
+                            &new_input,
+                            &buffer,
+                            &sound_buffer,
                         );
+
+                        // direct sound output test
+                        if sound_is_valid && bytes_to_write > 0 {
+                            fill_sound_buffer(
+                                &mut sound_output,
+                                byte_to_lock,
+                                bytes_to_write,
+                                &mut sound_buffer,
+                            );
+                        }
+
+                        let dimension = get_window_dimension(window);
+                        display_buffer_in_window(
+                            &GLOBAL_BACK_BUFFER,
+                            device_context,
+                            dimension.width,
+                            dimension.height,
+                        );
+
+                        let mut end_counter: LARGE_INTEGER = zeroed();
+                        QueryPerformanceCounter(&mut end_counter);
+
+                        let counter_elapsed = end_counter.QuadPart() - last_counter.QuadPart();
+                        trace!(
+                            "{}ms/f, {}f/s",
+                            1000 * counter_elapsed / performance_count_frequency,
+                            performance_count_frequency / counter_elapsed
+                        );
+
+                        last_counter = end_counter;
+
+                        let temp = new_input;
+                        new_input = old_input;
+                        old_input = temp;
                     }
-
-                    let dimension = get_window_dimension(window);
-                    display_buffer_in_window(
-                        &GLOBAL_BACK_BUFFER,
-                        device_context,
-                        dimension.width,
-                        dimension.height,
+                } else {
+                    error!(
+                        "Could not allocate game memory {:?} or samples {:?}",
+                        game_memory, samples
                     );
-
-                    let mut end_counter: LARGE_INTEGER = zeroed();
-                    QueryPerformanceCounter(&mut end_counter);
-
-                    let counter_elapsed = end_counter.QuadPart() - last_counter.QuadPart();
-                    trace!(
-                        "{}ms/f / {}f/s",
-                        1000 * counter_elapsed / performance_count_frequency,
-                        performance_count_frequency / counter_elapsed
-                    );
-
-                    last_counter = end_counter;
                 }
             } else {
                 error!("Window wasn't created");

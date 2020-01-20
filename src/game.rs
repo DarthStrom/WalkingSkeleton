@@ -3,9 +3,6 @@ use std::f32::{self, consts::PI};
 use winapi::ctypes::c_void;
 
 static mut T_SINE: f32 = 0.0;
-static mut BLUE_OFFSET: i32 = 0;
-static mut GREEN_OFFSET: i32 = 0;
-static mut TONE_HZ: u32 = 256;
 
 pub struct OffscreenBuffer {
     pub memory: *mut c_void,
@@ -49,30 +46,57 @@ pub struct Input {
     pub controllers: [ControllerInput; 4],
 }
 
+#[derive(Debug)]
+pub struct Memory {
+    pub is_initialized: bool,
+    pub permanent_storage_size: usize,
+    // required to be cleared to zero at startup
+    pub permanent_storage: *mut u8,
+    pub transient_storage_size: usize,
+    // required to be cleared to zero at startup
+    pub transient_storage: *mut u8,
+}
+
+pub struct State {
+    pub tone_hz: u32,
+    pub green_offset: i32,
+    pub blue_offset: i32,
+}
+
 // TODO: services that the platform layer provides to the game
 
 // services that the game provides to the platform layer
 pub fn update_and_render(
+    memory: &mut Memory,
     input: &Input,
     buffer: &OffscreenBuffer,
     sound_buffer: &SoundOutputBuffer,
 ) {
-    let input0 = &input.controllers[0];
+    debug_assert!(std::mem::size_of::<State>() <= memory.permanent_storage_size);
+
     unsafe {
+        let state = memory.permanent_storage as *mut State;
+
+        if !memory.is_initialized {
+            (*state).tone_hz = 256;
+            memory.is_initialized = true;
+        }
+
+        let input0 = &input.controllers[0];
         if input0.is_analog {
             // use analog movement tuning
-            BLUE_OFFSET += (4.0 * input0.end_x) as i32;
-            TONE_HZ = (256.0 + 128.0 * input0.end_y) as u32;
+            (*state).blue_offset += (4.0 * input0.end_x) as i32;
+            (*state).tone_hz = (256.0 + 128.0 * input0.end_y) as u32;
         } else {
             // use digital movement tuning
         }
 
         if input0.down.ended_down {
-            GREEN_OFFSET += 1;
+            (*state).green_offset += 1;
         }
 
-        output_sound(sound_buffer, TONE_HZ);
-        render_weird_gradient(buffer, BLUE_OFFSET, GREEN_OFFSET)
+        output_sound(sound_buffer, (*state).tone_hz);
+        render_weird_gradient(buffer, (*state).blue_offset, (*state).green_offset)
     };
 }
 

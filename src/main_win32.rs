@@ -72,6 +72,14 @@ static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     bytes_per_pixel: 4,
 };
 
+pub unsafe fn get_controller(
+    input: *mut game::Input,
+    controller_index: usize,
+) -> *mut game::ControllerInput {
+    debug_assert!(controller_index < (*input).controllers.len());
+    &mut (*input).controllers[controller_index]
+}
+
 fn win32_string(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(once(0)).collect()
 }
@@ -330,8 +338,11 @@ unsafe fn fill_sound_buffer(
 }
 
 fn process_keyboard_message(new_state: &mut game::ButtonState, is_down: bool) {
-    new_state.ended_down = is_down;
-    new_state.half_transition_count += 1;
+    if new_state.ended_down != is_down {
+        new_state.ended_down = is_down;
+        new_state.half_transition_count += 1;
+    }
+    debug_assert!(new_state.ended_down == is_down);
 }
 
 fn process_xinput_digital_button(
@@ -348,6 +359,18 @@ fn process_xinput_digital_button(
     };
 }
 
+fn process_xinput_stick_value(value: SHORT, dead_zone_threshold: SHORT) -> f32 {
+    let mut result = 0.0;
+
+    if value < -dead_zone_threshold {
+        result = (value + dead_zone_threshold) as f32 / (32768.0 - dead_zone_threshold as f32)
+    } else if value > dead_zone_threshold {
+        result = (value - dead_zone_threshold) as f32 / (32767.0 - dead_zone_threshold as f32)
+    }
+
+    result
+}
+
 unsafe fn process_pending_messages(keyboard_controller: &mut game::ControllerInput) {
     let mut message = zeroed();
     while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
@@ -360,12 +383,24 @@ unsafe fn process_pending_messages(keyboard_controller: &mut game::ControllerInp
                 let was_down = message.lParam & (1 << 30) != 0;
                 let is_down = message.lParam & (1 << 31) == 0;
 
-                if was_down != is_down {
+                if was_down != is_down || (!was_down && !is_down) {
                     match vk_code {
-                        VK_W => debug!("W"),
-                        VK_A => debug!("A"),
-                        VK_S => debug!("S"),
-                        VK_D => debug!("D"),
+                        VK_W => {
+                            process_keyboard_message(&mut keyboard_controller.move_up, is_down);
+                            debug!("W");
+                        }
+                        VK_A => {
+                            process_keyboard_message(&mut keyboard_controller.move_left, is_down);
+                            debug!("A");
+                        }
+                        VK_S => {
+                            process_keyboard_message(&mut keyboard_controller.move_down, is_down);
+                            debug!("S");
+                        }
+                        VK_D => {
+                            process_keyboard_message(&mut keyboard_controller.move_right, is_down);
+                            debug!("D");
+                        }
                         VK_Q => {
                             process_keyboard_message(
                                 &mut keyboard_controller.left_shoulder,
@@ -381,23 +416,32 @@ unsafe fn process_pending_messages(keyboard_controller: &mut game::ControllerInp
                             debug!("E");
                         }
                         VK_UP => {
-                            process_keyboard_message(&mut keyboard_controller.up, is_down);
+                            process_keyboard_message(&mut keyboard_controller.action_up, is_down);
                             debug!("UP");
                         }
                         VK_LEFT => {
-                            process_keyboard_message(&mut keyboard_controller.left, is_down);
+                            process_keyboard_message(&mut keyboard_controller.action_left, is_down);
                             debug!("LEFT");
                         }
                         VK_DOWN => {
-                            process_keyboard_message(&mut keyboard_controller.down, is_down);
-                            debug!("DOWN: {:?}", keyboard_controller.down);
+                            process_keyboard_message(&mut keyboard_controller.action_down, is_down);
+                            debug!("DOWN: {:?}", keyboard_controller.action_down);
                         }
                         VK_RIGHT => {
-                            process_keyboard_message(&mut keyboard_controller.right, is_down);
+                            process_keyboard_message(
+                                &mut keyboard_controller.action_right,
+                                is_down,
+                            );
                             debug!("RIGHT");
                         }
-                        VK_ESCAPE => GLOBAL_RUNNING = false,
-                        VK_SPACE => debug!("SPACE"),
+                        VK_ESCAPE => {
+                            process_keyboard_message(&mut keyboard_controller.start, is_down);
+                            debug!("ESCAPE");
+                        }
+                        VK_SPACE => {
+                            process_keyboard_message(&mut keyboard_controller.select, is_down);
+                            debug!("SPACE");
+                        }
                         _ => {}
                     };
                 }
@@ -514,101 +558,192 @@ pub fn main() {
                     let mut last_counter: LARGE_INTEGER = zeroed();
                     QueryPerformanceCounter(&mut last_counter);
                     while GLOBAL_RUNNING {
-                        // TODO: zeroing macro
-                        // TODO: We can't zero everything because the up/down state will
-                        // be wrong
-                        let keyboard_controller = &mut new_input.controllers[0];
+                        let old_keyboard_controller = get_controller(&mut old_input, 0);
+                        let new_keyboard_controller = get_controller(&mut new_input, 0);
+                        *new_keyboard_controller = zeroed();
+                        (*new_keyboard_controller).is_connected = true;
 
-                        process_pending_messages(keyboard_controller);
+                        (*new_keyboard_controller).move_up.ended_down =
+                            (*old_keyboard_controller).move_up.ended_down;
+                        (*new_keyboard_controller).move_down.ended_down =
+                            (*old_keyboard_controller).move_down.ended_down;
+                        (*new_keyboard_controller).move_left.ended_down =
+                            (*old_keyboard_controller).move_left.ended_down;
+                        (*new_keyboard_controller).move_right.ended_down =
+                            (*old_keyboard_controller).move_right.ended_down;
 
+                        (*new_keyboard_controller).action_up.ended_down =
+                            (*old_keyboard_controller).action_up.ended_down;
+                        (*new_keyboard_controller).action_down.ended_down =
+                            (*old_keyboard_controller).action_down.ended_down;
+                        (*new_keyboard_controller).action_left.ended_down =
+                            (*old_keyboard_controller).action_left.ended_down;
+                        (*new_keyboard_controller).action_right.ended_down =
+                            (*old_keyboard_controller).action_right.ended_down;
+
+                        (*new_keyboard_controller).left_shoulder.ended_down =
+                            (*old_keyboard_controller).left_shoulder.ended_down;
+                        (*new_keyboard_controller).right_shoulder.ended_down =
+                            (*old_keyboard_controller).right_shoulder.ended_down;
+                        (*new_keyboard_controller).select.ended_down =
+                            (*old_keyboard_controller).select.ended_down;
+                        (*new_keyboard_controller).start.ended_down =
+                            (*old_keyboard_controller).start.ended_down;
+                        (*new_keyboard_controller).terminator.ended_down =
+                            (*old_keyboard_controller).terminator.ended_down;
+
+                        process_pending_messages(new_keyboard_controller.as_mut().unwrap());
+
+                        // TODO: Need to not poll disconnected controllers to avoid
+                        // xinput frame rate hit on older libraries...
                         // TODO: should we poll this more frequently?
                         let mut max_controller_count = XUSER_MAX_COUNT as usize;
-                        if max_controller_count > new_input.controllers.len() {
-                            max_controller_count = new_input.controllers.len()
+                        if max_controller_count > (new_input.controllers.len() - 1) {
+                            max_controller_count = new_input.controllers.len() - 1
                         }
 
                         for controller_index in 0..max_controller_count {
-                            let old_controller = &old_input.controllers[controller_index];
-                            let mut new_controller = &mut new_input.controllers[controller_index];
+                            let our_controller_index = controller_index + 1;
+                            let old_controller =
+                                get_controller(&mut old_input, our_controller_index);
+                            let mut new_controller =
+                                get_controller(&mut new_input, our_controller_index);
 
                             let mut controller_state: XINPUT_STATE = zeroed();
                             if XInputGetState(controller_index as u32, &mut controller_state)
                                 == ERROR_SUCCESS
                             {
+                                (*new_controller).is_connected = true;
+
                                 // controller is plugged in
                                 let pad = controller_state.Gamepad;
 
-                                // TODO: DPad
-                                let _up = pad.wButtons & XINPUT_GAMEPAD_DPAD_UP > 0;
-                                let _down = pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN > 0;
-                                let _left = pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT > 0;
-                                let _right = pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT > 0;
+                                // TODO: This is a square deadzone, check XInput to
+                                // verify that the deadzone is "round" and show how to do
+                                // round deadzone processing.
+                                (*new_controller).stick_average_x = process_xinput_stick_value(
+                                    pad.sThumbLX,
+                                    XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
+                                );
+                                (*new_controller).stick_average_y = process_xinput_stick_value(
+                                    pad.sThumbLY,
+                                    XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
+                                );
+                                if ((*new_controller).stick_average_x != 0.0)
+                                    || ((*new_controller).stick_average_y != 0.0)
+                                {
+                                    (*new_controller).is_analog = true;
+                                }
 
-                                new_controller.is_analog = true;
-                                new_controller.start_x = old_controller.end_x;
-                                new_controller.start_y = old_controller.end_y;
+                                if pad.wButtons & XINPUT_GAMEPAD_DPAD_UP != 0 {
+                                    (*new_controller).stick_average_y = 1.0;
+                                    (*new_controller).is_analog = false;
+                                } else if pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN != 0 {
+                                    (*new_controller).stick_average_y = -1.0;
+                                    (*new_controller).is_analog = false;
+                                }
 
-                                // TODO: Dead zone processing
-                                // XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE
-                                // XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE
+                                if pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT != 0 {
+                                    (*new_controller).stick_average_x = -1.0;
+                                    (*new_controller).is_analog = false;
+                                } else if pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT != 0 {
+                                    (*new_controller).stick_average_x = 1.0;
+                                    (*new_controller).is_analog = false;
+                                }
 
-                                // TODO: Min/Max macros
-                                // TODO: Collapse to single function
-                                let x = if pad.sThumbLX < 0 {
-                                    pad.sThumbLX as f32 / 32768.0
-                                } else {
-                                    pad.sThumbLX as f32 / 32767.0
-                                };
-                                new_controller.min_x = x;
-                                new_controller.max_x = x;
-                                new_controller.end_x = x;
-
-                                let y = if pad.sThumbLY < 0 {
-                                    pad.sThumbLY as f32 / 32768.0
-                                } else {
-                                    pad.sThumbLY as f32 / 32767.0
-                                };
-                                new_controller.min_y = y;
-                                new_controller.max_y = y;
-                                new_controller.end_y = y;
-
+                                let threshold = 0.5;
                                 process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &old_controller.right,
-                                    XINPUT_GAMEPAD_A,
-                                    &mut new_controller.right,
+                                    if (*new_controller).stick_average_x < -threshold {
+                                        1
+                                    } else {
+                                        0
+                                    },
+                                    &(*old_controller).move_left,
+                                    1,
+                                    &mut (*new_controller).move_left,
                                 );
                                 process_xinput_digital_button(
+                                    if (*new_controller).stick_average_x > threshold {
+                                        1
+                                    } else {
+                                        0
+                                    },
+                                    &(*old_controller).move_right,
+                                    1,
+                                    &mut (*new_controller).move_right,
+                                );
+                                process_xinput_digital_button(
+                                    if (*new_controller).stick_average_y < -threshold {
+                                        1
+                                    } else {
+                                        0
+                                    },
+                                    &(*old_controller).move_down,
+                                    1,
+                                    &mut (*new_controller).move_down,
+                                );
+                                process_xinput_digital_button(
+                                    if (*new_controller).stick_average_x > threshold {
+                                        1
+                                    } else {
+                                        0
+                                    },
+                                    &(*old_controller).move_up,
+                                    1,
+                                    &mut (*new_controller).move_up,
+                                );
+
+                                process_xinput_digital_button(
                                     pad.wButtons,
-                                    &old_controller.down,
+                                    &(*old_controller).action_down,
                                     XINPUT_GAMEPAD_B,
-                                    &mut new_controller.down,
+                                    &mut (*new_controller).action_down,
                                 );
                                 process_xinput_digital_button(
                                     pad.wButtons,
-                                    &old_controller.up,
-                                    XINPUT_GAMEPAD_X,
-                                    &mut new_controller.up,
+                                    &(*old_controller).action_right,
+                                    XINPUT_GAMEPAD_A,
+                                    &mut (*new_controller).action_right,
                                 );
                                 process_xinput_digital_button(
                                     pad.wButtons,
-                                    &old_controller.left,
+                                    &(*old_controller).action_left,
                                     XINPUT_GAMEPAD_Y,
-                                    &mut new_controller.left,
+                                    &mut (*new_controller).action_left,
                                 );
                                 process_xinput_digital_button(
                                     pad.wButtons,
-                                    &old_controller.left_shoulder,
+                                    &(*old_controller).action_up,
+                                    XINPUT_GAMEPAD_X,
+                                    &mut (*new_controller).action_up,
+                                );
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &(*old_controller).left_shoulder,
                                     XINPUT_GAMEPAD_LEFT_SHOULDER,
-                                    &mut new_controller.left_shoulder,
+                                    &mut (*new_controller).left_shoulder,
                                 );
                                 process_xinput_digital_button(
                                     pad.wButtons,
-                                    &old_controller.right_shoulder,
+                                    &(*old_controller).right_shoulder,
                                     XINPUT_GAMEPAD_RIGHT_SHOULDER,
-                                    &mut new_controller.right_shoulder,
+                                    &mut (*new_controller).right_shoulder,
+                                );
+
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &(*old_controller).start,
+                                    XINPUT_GAMEPAD_START,
+                                    &mut (*new_controller).start,
+                                );
+                                process_xinput_digital_button(
+                                    pad.wButtons,
+                                    &(*old_controller).select,
+                                    XINPUT_GAMEPAD_START,
+                                    &mut (*new_controller).select,
                                 );
                             } else {
+                                (*new_controller).is_connected = false;
                                 trace!("controller is not available");
                             }
                         }
@@ -658,7 +793,7 @@ pub fn main() {
                         };
                         game::update_and_render(
                             &mut game_memory,
-                            &new_input,
+                            &mut new_input,
                             &buffer,
                             &sound_buffer,
                         );

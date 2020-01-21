@@ -1,4 +1,4 @@
-// use super::platform;
+use super::platform;
 use std::f32::{self, consts::PI};
 use winapi::ctypes::c_void;
 
@@ -27,25 +27,32 @@ pub struct ButtonState {
 
 #[derive(Default)]
 pub struct ControllerInput {
+    pub is_connected: bool,
     pub is_analog: bool,
-    pub start_x: f32,
-    pub start_y: f32,
-    pub min_x: f32,
-    pub min_y: f32,
-    pub max_x: f32,
-    pub max_y: f32,
-    pub end_x: f32,
-    pub end_y: f32,
-    pub up: ButtonState,
-    pub down: ButtonState,
-    pub left: ButtonState,
-    pub right: ButtonState,
+    pub stick_average_x: f32,
+    pub stick_average_y: f32,
+
+    pub move_up: ButtonState,
+    pub move_down: ButtonState,
+    pub move_left: ButtonState,
+    pub move_right: ButtonState,
+
+    pub action_up: ButtonState,
+    pub action_down: ButtonState,
+    pub action_left: ButtonState,
+    pub action_right: ButtonState,
+
     pub left_shoulder: ButtonState,
     pub right_shoulder: ButtonState,
+
+    pub select: ButtonState,
+    pub start: ButtonState,
+
+    pub terminator: ButtonState,
 }
 
 pub struct Input {
-    pub controllers: [ControllerInput; 4],
+    pub controllers: [ControllerInput; 5],
 }
 
 #[derive(Debug)]
@@ -66,45 +73,53 @@ pub struct State {
 }
 
 // services that the game provides to the platform layer
-pub fn update_and_render(
+pub unsafe fn update_and_render(
     memory: &mut Memory,
-    input: &Input,
+    input: &mut Input,
     buffer: &OffscreenBuffer,
     sound_buffer: &SoundOutputBuffer,
 ) {
     debug_assert!(std::mem::size_of::<State>() <= memory.permanent_storage_size);
 
-    unsafe {
-        let game_state = memory.permanent_storage as *mut State;
+    let game_state = memory.permanent_storage as *mut State;
 
-        if !memory.is_initialized {
-            let contents = std::fs::read_to_string(file!()).expect("could not read file");
-            std::fs::write("test.out", contents).expect("could not write file");
+    if !memory.is_initialized {
+        let contents = std::fs::read_to_string(file!()).expect("could not read file");
+        std::fs::write("test.out", contents).expect("could not write file");
 
-            (*game_state).tone_hz = 256;
-            memory.is_initialized = true;
-        }
+        (*game_state).tone_hz = 256;
+        memory.is_initialized = true;
+    }
 
-        let input0 = &input.controllers[0];
-        if input0.is_analog {
-            // use analog movement tuning
-            (*game_state).blue_offset += (4.0 * input0.end_x) as i32;
-            (*game_state).tone_hz = (256.0 + 128.0 * input0.end_y) as u32;
+    for controller_index in 0..input.controllers.len() {
+        let controller = platform::get_controller(input, controller_index);
+        if (*controller).is_analog {
+            trace!("use analog movement tuning");
+            (*game_state).blue_offset += (4.0 * (*controller).stick_average_x) as i32;
+            (*game_state).tone_hz = (256.0 + 128.0 * (*controller).stick_average_y) as u32;
         } else {
-            // use digital movement tuning
+            trace!("use digital movement tuning");
+
+            if (*controller).move_left.ended_down {
+                (*game_state).blue_offset -= 1;
+            }
+
+            if (*controller).move_right.ended_down {
+                (*game_state).blue_offset += 1
+            }
         }
 
-        if input0.down.ended_down {
+        if (*controller).action_down.ended_down {
             (*game_state).green_offset += 1;
         }
+    }
 
-        output_sound(sound_buffer, (*game_state).tone_hz);
-        render_weird_gradient(
-            buffer,
-            (*game_state).blue_offset,
-            (*game_state).green_offset,
-        )
-    };
+    output_sound(sound_buffer, (*game_state).tone_hz);
+    render_weird_gradient(
+        buffer,
+        (*game_state).blue_offset,
+        (*game_state).green_offset,
+    );
 }
 
 // TODO: platform independent code should get priority for removing unsafe

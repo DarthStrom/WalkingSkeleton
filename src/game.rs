@@ -19,11 +19,13 @@ pub struct SoundOutputBuffer {
     pub samples: *mut i16,
 }
 
+#[derive(Debug, Default)]
 pub struct ButtonState {
     pub half_transition_count: i32,
     pub ended_down: bool,
 }
 
+#[derive(Default)]
 pub struct ControllerInput {
     pub is_analog: bool,
     pub start_x: f32,
@@ -73,31 +75,35 @@ pub fn update_and_render(
     debug_assert!(std::mem::size_of::<State>() <= memory.permanent_storage_size);
 
     unsafe {
-        let state = memory.permanent_storage as *mut State;
+        let game_state = memory.permanent_storage as *mut State;
 
         if !memory.is_initialized {
-            (*state).tone_hz = 256;
+            let contents = std::fs::read_to_string(file!()).expect("could not read file");
+            std::fs::write("test.out", contents).expect("could not write file");
+
+            (*game_state).tone_hz = 256;
             memory.is_initialized = true;
         }
-
-        let contents = std::fs::read_to_string(file!()).expect("could not read file");
-        std::fs::write("test.out", contents).expect("could not write file");
 
         let input0 = &input.controllers[0];
         if input0.is_analog {
             // use analog movement tuning
-            (*state).blue_offset += (4.0 * input0.end_x) as i32;
-            (*state).tone_hz = (256.0 + 128.0 * input0.end_y) as u32;
+            (*game_state).blue_offset += (4.0 * input0.end_x) as i32;
+            (*game_state).tone_hz = (256.0 + 128.0 * input0.end_y) as u32;
         } else {
             // use digital movement tuning
         }
 
         if input0.down.ended_down {
-            (*state).green_offset += 1;
+            (*game_state).green_offset += 1;
         }
 
-        output_sound(sound_buffer, (*state).tone_hz);
-        render_weird_gradient(buffer, (*state).blue_offset, (*state).green_offset)
+        output_sound(sound_buffer, (*game_state).tone_hz);
+        render_weird_gradient(
+            buffer,
+            (*game_state).blue_offset,
+            (*game_state).green_offset,
+        )
     };
 }
 

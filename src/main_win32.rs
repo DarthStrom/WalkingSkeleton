@@ -227,35 +227,7 @@ unsafe extern "system" fn main_window_callback(
     match message {
         WM_ACTIVATEAPP => trace!("WM_ACTIVATEAPP"),
         WM_CLOSE | WM_DESTROY => GLOBAL_RUNNING = false,
-        WM_KEYUP | WM_KEYDOWN => {
-            let vk_code = w_param as i32;
-            let was_down = l_param & (1 << 30) != 0;
-            let is_down = l_param & (1 << 31) == 0;
-
-            if was_down != is_down {
-                match vk_code {
-                    VK_W => trace!("W"),
-                    VK_A => trace!("A"),
-                    VK_S => trace!("S"),
-                    VK_D => trace!("D"),
-                    VK_Q => trace!("Q"),
-                    VK_E => trace!("E"),
-                    VK_UP => trace!("up"),
-                    VK_LEFT => trace!("LEFT"),
-                    VK_DOWN => trace!("DOWN"),
-                    VK_RIGHT => trace!("RIGHT"),
-                    VK_ESCAPE => {
-                        trace!(
-                            "ESCAPE: {}{}",
-                            if is_down { " IsDown" } else { "" },
-                            if was_down { " WasDown" } else { "" }
-                        );
-                    }
-                    VK_SPACE => trace!("SPACE"),
-                    _ => {}
-                };
-            }
-        }
+        WM_KEYUP | WM_KEYDOWN => panic!("Keyboard input came in through a non-dispatch message!"),
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
             let device_context = BeginPaint(window, &mut paint);
@@ -357,6 +329,11 @@ unsafe fn fill_sound_buffer(
     }
 }
 
+fn process_keyboard_message(new_state: &mut game::ButtonState, is_down: bool) {
+    new_state.ended_down = is_down;
+    new_state.half_transition_count += 1;
+}
+
 fn process_xinput_digital_button(
     xinput_button_state: WORD,
     old_state: &game::ButtonState,
@@ -369,6 +346,68 @@ fn process_xinput_digital_button(
     } else {
         0
     };
+}
+
+unsafe fn process_pending_messages(keyboard_controller: &mut game::ControllerInput) {
+    let mut message = zeroed();
+    while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+        match message.message {
+            WM_QUIT => GLOBAL_RUNNING = false,
+            WM_KEYDOWN | WM_KEYUP => {
+                // letting windows handle WM_SYSKEYUP and WM_SYSKEYDOWN
+                // so I don't have to detect Alt-F4 etc.
+                let vk_code = message.wParam as i32;
+                let was_down = message.lParam & (1 << 30) != 0;
+                let is_down = message.lParam & (1 << 31) == 0;
+
+                if was_down != is_down {
+                    match vk_code {
+                        VK_W => debug!("W"),
+                        VK_A => debug!("A"),
+                        VK_S => debug!("S"),
+                        VK_D => debug!("D"),
+                        VK_Q => {
+                            process_keyboard_message(
+                                &mut keyboard_controller.left_shoulder,
+                                is_down,
+                            );
+                            debug!("Q");
+                        }
+                        VK_E => {
+                            process_keyboard_message(
+                                &mut keyboard_controller.right_shoulder,
+                                is_down,
+                            );
+                            debug!("E");
+                        }
+                        VK_UP => {
+                            process_keyboard_message(&mut keyboard_controller.up, is_down);
+                            debug!("UP");
+                        }
+                        VK_LEFT => {
+                            process_keyboard_message(&mut keyboard_controller.left, is_down);
+                            debug!("LEFT");
+                        }
+                        VK_DOWN => {
+                            process_keyboard_message(&mut keyboard_controller.down, is_down);
+                            debug!("DOWN: {:?}", keyboard_controller.down);
+                        }
+                        VK_RIGHT => {
+                            process_keyboard_message(&mut keyboard_controller.right, is_down);
+                            debug!("RIGHT");
+                        }
+                        VK_ESCAPE => GLOBAL_RUNNING = false,
+                        VK_SPACE => debug!("SPACE"),
+                        _ => {}
+                    };
+                }
+            }
+            _ => {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
 }
 
 pub fn main() {
@@ -451,7 +490,7 @@ pub fn main() {
                 };
                 let mut game_memory: game::Memory = zeroed();
                 game_memory.permanent_storage_size = megabytes(64);
-                game_memory.transient_storage_size = gigabytes(4);
+                game_memory.transient_storage_size = gigabytes(1);
 
                 let total_size =
                     game_memory.permanent_storage_size + game_memory.transient_storage_size;
@@ -475,16 +514,12 @@ pub fn main() {
                     let mut last_counter: LARGE_INTEGER = zeroed();
                     QueryPerformanceCounter(&mut last_counter);
                     while GLOBAL_RUNNING {
-                        let mut message = zeroed();
+                        // TODO: zeroing macro
+                        // TODO: We can't zero everything because the up/down state will
+                        // be wrong
+                        let keyboard_controller = &mut new_input.controllers[0];
 
-                        while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
-                            if message.message == WM_QUIT {
-                                GLOBAL_RUNNING = false;
-                            }
-
-                            TranslateMessage(&message);
-                            DispatchMessageW(&message);
-                        }
+                        process_pending_messages(keyboard_controller);
 
                         // TODO: should we poll this more frequently?
                         let mut max_controller_count = XUSER_MAX_COUNT as usize;
@@ -658,9 +693,7 @@ pub fn main() {
 
                         last_counter = end_counter;
 
-                        let temp = new_input;
-                        new_input = old_input;
-                        old_input = temp;
+                        std::mem::swap(&mut new_input, &mut old_input);
                     }
                 } else {
                     error!(

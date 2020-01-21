@@ -63,8 +63,6 @@ pub struct State {
     pub blue_offset: i32,
 }
 
-// TODO: services that the platform layer provides to the game
-
 // services that the game provides to the platform layer
 pub fn update_and_render(
     memory: &mut Memory,
@@ -81,6 +79,9 @@ pub fn update_and_render(
             (*state).tone_hz = 256;
             memory.is_initialized = true;
         }
+
+        let contents = std::fs::read_to_string(file!()).expect("could not read file");
+        std::fs::write("test.out", contents).expect("could not write file");
 
         let input0 = &input.controllers[0];
         if input0.is_analog {

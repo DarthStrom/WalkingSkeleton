@@ -18,6 +18,7 @@ const VK_S: i32 = 'S' as i32;
 const VK_D: i32 = 'D' as i32;
 const VK_Q: i32 = 'Q' as i32;
 const VK_E: i32 = 'E' as i32;
+const VK_P: i32 = 'P' as i32;
 
 struct OffscreenBuffer {
     info: BITMAPINFO,
@@ -37,17 +38,25 @@ struct SoundOutput {
     running_sample_index: u32,
     bytes_per_sample: u32,
     sound_buffer_size: DWORD,
+    safety_bytes: DWORD,
     samples_per_second: u32,
-    latency_sample_count: u32,
+    // TODO: Should running sample index be in bytes as well?
+    // TODO: Math gets simpler if we add a "bytes per second" field?
 }
 
-#[cfg(debug_assertions)]
 struct DebugTimeMarker {
-    play_cursor: DWORD,
-    write_cursor: DWORD,
+    output_play_cursor: DWORD,
+    output_write_cursor: DWORD,
+    output_location: DWORD,
+    output_byte_count: DWORD,
+    expected_flip_play_cursor: DWORD,
+
+    flip_play_cursor: DWORD,
+    flip_write_cursor: DWORD,
 }
 
 static mut GLOBAL_RUNNING: bool = true;
+static mut GLOBAL_PAUSE: bool = false;
 static mut GLOBAL_PERF_COUNT_FREQUENCY: i64 = 0;
 static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
 static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
@@ -437,7 +446,7 @@ unsafe fn process_pending_messages(keyboard_controller: &mut game::ControllerInp
                         }
                         VK_DOWN => {
                             process_keyboard_message(&mut keyboard_controller.action_down, is_down);
-                            debug!("DOWN: {:?}", keyboard_controller.action_down);
+                            debug!("DOWN");
                         }
                         VK_RIGHT => {
                             process_keyboard_message(
@@ -453,6 +462,12 @@ unsafe fn process_pending_messages(keyboard_controller: &mut game::ControllerInp
                         VK_SPACE => {
                             process_keyboard_message(&mut keyboard_controller.select, is_down);
                             debug!("SPACE");
+                        }
+                        #[cfg(debug_assertions)]
+                        VK_P => {
+                            if is_down {
+                                GLOBAL_PAUSE = !GLOBAL_PAUSE;
+                            }
                         }
                         _ => {}
                     };
@@ -480,24 +495,36 @@ fn get_seconds_elapsed(start: LARGE_INTEGER, end: LARGE_INTEGER) -> f32 {
 
 #[cfg(debug_assertions)]
 unsafe fn debug_draw_vertical(
-    global_back_buffer: &OffscreenBuffer,
+    back_buffer: &OffscreenBuffer,
     x: i32,
     top: i32,
     bottom: i32,
     color: u32,
 ) {
-    let mut pixel = (global_back_buffer.memory as *mut u8)
-        .offset((x * global_back_buffer.bytes_per_pixel + top * global_back_buffer.pitch) as isize);
-    for _ in top..bottom {
-        *(pixel as *mut u32) = color;
-        pixel = pixel.offset(global_back_buffer.pitch as isize);
+    let actual_top = if top <= 0 { 0 } else { top };
+
+    let actual_bottom = if bottom > back_buffer.height {
+        back_buffer.height
+    } else {
+        bottom
+    };
+
+    if (x >= 0) && (x < back_buffer.width) {
+        let mut pixel = back_buffer
+            .memory
+            .offset((x * back_buffer.bytes_per_pixel + actual_top * back_buffer.pitch) as isize)
+            as *mut u8;
+        #[allow(clippy::cast_ptr_alignment)]
+        for _ in actual_top..actual_bottom {
+            *(pixel as *mut u32) = color;
+            pixel = pixel.offset(back_buffer.pitch as isize);
+        }
     }
 }
 
 #[cfg(debug_assertions)]
 fn debug_draw_sound_buffer_marker(
     back_buffer: &OffscreenBuffer,
-    sound_output: &SoundOutput,
     c: f32,
     pad_x: i32,
     top: i32,
@@ -505,7 +532,6 @@ fn debug_draw_sound_buffer_marker(
     value: DWORD,
     color: u32,
 ) {
-    debug_assert!(value < sound_output.sound_buffer_size);
     let x_f32 = c * value as f32;
     let x = pad_x + x_f32 as i32;
     unsafe {
@@ -516,45 +542,130 @@ fn debug_draw_sound_buffer_marker(
 #[cfg(debug_assertions)]
 unsafe fn debug_sync_display(
     back_buffer: &OffscreenBuffer,
-    marker_count: usize,
     markers: &mut [DebugTimeMarker],
+    current_marker_index: isize,
     sound_output: &SoundOutput,
-    target_seconds_per_frame: f32,
 ) {
-    // TODO: Draw where we're writing out sound
-
     let pad_x = 16;
     let pad_y = 16;
 
-    let top = pad_y;
-    let bottom = back_buffer.height - pad_y;
+    let line_height = 64;
 
     let c = (back_buffer.width - 2 * pad_x) as f32 / sound_output.sound_buffer_size as f32;
-    for marker_index in 0..marker_count {
-        let this_marker = &markers[marker_index];
+    for (marker_index, marker) in markers.iter().enumerate() {
+        debug_assert!(marker.output_play_cursor < sound_output.sound_buffer_size);
+        debug_assert!(marker.output_write_cursor < sound_output.sound_buffer_size);
+        debug_assert!(marker.output_location < sound_output.sound_buffer_size);
+        debug_assert!(marker.output_byte_count < sound_output.sound_buffer_size);
+        debug_assert!(marker.flip_play_cursor < sound_output.sound_buffer_size);
+        debug_assert!(marker.flip_write_cursor < sound_output.sound_buffer_size);
+
+        let play_color = 0xFF_FF_FF_FF;
+        let write_color = 0xFF_FF_00_00;
+        let expected_flip_color = 0xFF_FF_FF_00;
+        let play_window_color = 0xFF_FF_00_FF;
+
+        let mut top = pad_y;
+        let mut bottom = pad_y + line_height;
+
+        let current_marker_index_u = if current_marker_index < 0 {
+            0
+        } else {
+            current_marker_index
+        } as usize;
+
+        if marker_index == current_marker_index_u {
+            top += line_height + pad_y;
+            bottom += line_height + pad_y;
+
+            let first_top = top;
+
+            debug_draw_sound_buffer_marker(
+                back_buffer,
+                c,
+                pad_x,
+                top,
+                bottom,
+                marker.output_play_cursor,
+                play_color,
+            );
+            debug_draw_sound_buffer_marker(
+                back_buffer,
+                c,
+                pad_x,
+                top,
+                bottom,
+                marker.output_write_cursor,
+                write_color,
+            );
+
+            top += line_height + pad_y;
+            bottom += line_height + pad_y;
+
+            debug_draw_sound_buffer_marker(
+                back_buffer,
+                c,
+                pad_x,
+                top,
+                bottom,
+                marker.output_location,
+                play_color,
+            );
+            debug_draw_sound_buffer_marker(
+                back_buffer,
+                c,
+                pad_x,
+                top,
+                bottom,
+                marker.output_location + marker.output_byte_count,
+                write_color,
+            );
+
+            top += line_height + pad_y;
+            bottom += line_height + pad_y;
+
+            debug_draw_sound_buffer_marker(
+                back_buffer,
+                c,
+                pad_x,
+                first_top,
+                bottom,
+                marker.expected_flip_play_cursor,
+                expected_flip_color,
+            );
+        }
+
         debug_draw_sound_buffer_marker(
             back_buffer,
-            sound_output,
             c,
             pad_x,
             top,
             bottom,
-            this_marker.play_cursor,
-            0xFFFFFFFF,
+            marker.flip_play_cursor,
+            play_color,
         );
         debug_draw_sound_buffer_marker(
             back_buffer,
-            sound_output,
             c,
             pad_x,
             top,
             bottom,
-            this_marker.write_cursor,
-            0xFFFF0000,
+            marker.flip_play_cursor + 1920 * sound_output.bytes_per_sample,
+            play_window_color,
+        );
+        debug_draw_sound_buffer_marker(
+            back_buffer,
+            c,
+            pad_x,
+            top,
+            bottom,
+            marker.flip_write_cursor,
+            write_color,
         );
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
 pub fn main() {
     unsafe {
         let mut performance_count_frequency_result = zeroed();
@@ -582,16 +693,9 @@ pub fn main() {
         resize_dib_section(&mut GLOBAL_BACK_BUFFER, 1280, 720);
 
         // TODO: How do we reliably query this on Windows?
-
-        // TODO: Let's think about running non-frame-quantized for audio latency...
-        // TODO: Let's use the write cursor delta from the play cursor to adjust
-        // the target audio latency.
-
-        let frames_of_audio_latency = 4;
         let monitor_refresh_hz = 60;
-        let game_update_hz = monitor_refresh_hz / 2;
-        let target_seconds_per_frame = 1.0 / game_update_hz as f32;
-
+        let game_update_hz = monitor_refresh_hz as f32 / 2.0;
+        let target_seconds_per_frame = 1.0 / game_update_hz;
         if RegisterClassW(&window_class) > 0 {
             let window = CreateWindowExW(
                 0,
@@ -611,18 +715,21 @@ pub fn main() {
             if !window.is_null() {
                 let device_context = GetDC(window);
 
-                // sound test
+                // TODO: Make this like sixty seconds?
                 let samples_per_second = 48_000;
                 let bytes_per_sample = (size_of::<i16>() * 2) as u32;
                 let sound_buffer_size = samples_per_second * bytes_per_sample as u32;
-                let latency_sample_count =
-                    frames_of_audio_latency * (samples_per_second / game_update_hz);
+                // TODO: Actually compute this variance and see
+                // what the lowest reasonable value is.
+                let safety_bytes = (((samples_per_second as f32 * bytes_per_sample as f32)
+                    / game_update_hz)
+                    / 1.0) as u32;
                 let mut sound_output = SoundOutput {
                     running_sample_index: 0,
                     bytes_per_sample,
                     sound_buffer_size,
+                    safety_bytes,
                     samples_per_second,
-                    latency_sample_count,
                 };
                 init_direct_sound(
                     window,
@@ -648,11 +755,9 @@ pub fn main() {
                 }
 
                 // TODO: Pool with bitmap virtualalloc
-                // remove max_possible_overrun?
-                let max_possible_overrun = 2 * 8 * size_of::<u16>() as u32;
                 let samples = VirtualAlloc(
                     null_mut(),
-                    (sound_output.sound_buffer_size + max_possible_overrun) as usize,
+                    sound_output.sound_buffer_size as usize,
                     MEM_RESERVE | MEM_COMMIT,
                     PAGE_READWRITE,
                 ) as *mut i16;
@@ -686,11 +791,13 @@ pub fn main() {
                     let mut old_input: game::Input = zeroed();
 
                     let mut last_counter = get_wall_clock();
+                    let mut flip_wall_clock = get_wall_clock();
 
                     let mut debug_time_marker_index = 0;
                     let mut debug_time_markers: [DebugTimeMarker; 30] = zeroed();
 
-                    let mut last_play_cursor = 0;
+                    let mut audio_latency_bytes;
+                    let mut audio_latency_seconds;
                     let mut sound_is_valid = false;
 
                     while GLOBAL_RUNNING {
@@ -730,305 +837,397 @@ pub fn main() {
 
                         process_pending_messages(new_keyboard_controller.as_mut().unwrap());
 
-                        // TODO: Need to not poll disconnected controllers to avoid
-                        // xinput frame rate hit on older libraries...
-                        // TODO: should we poll this more frequently?
-                        let mut max_controller_count = XUSER_MAX_COUNT as usize;
-                        if max_controller_count > (new_input.controllers.len() - 1) {
-                            max_controller_count = new_input.controllers.len() - 1
-                        }
-
-                        for controller_index in 0..max_controller_count {
-                            let our_controller_index = controller_index + 1;
-                            let old_controller =
-                                get_controller(&mut old_input, our_controller_index);
-                            let mut new_controller =
-                                get_controller(&mut new_input, our_controller_index);
-
-                            let mut controller_state: XINPUT_STATE = zeroed();
-                            if XInputGetState(controller_index as u32, &mut controller_state)
-                                == ERROR_SUCCESS
-                            {
-                                (*new_controller).is_connected = true;
-
-                                // controller is plugged in
-                                let pad = controller_state.Gamepad;
-
-                                // TODO: This is a square deadzone, check XInput to
-                                // verify that the deadzone is "round" and show how to do
-                                // round deadzone processing.
-                                (*new_controller).stick_average_x = process_xinput_stick_value(
-                                    pad.sThumbLX,
-                                    XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
-                                );
-                                (*new_controller).stick_average_y = process_xinput_stick_value(
-                                    pad.sThumbLY,
-                                    XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
-                                );
-                                if ((*new_controller).stick_average_x != 0.0)
-                                    || ((*new_controller).stick_average_y != 0.0)
-                                {
-                                    (*new_controller).is_analog = true;
-                                }
-
-                                if pad.wButtons & XINPUT_GAMEPAD_DPAD_UP != 0 {
-                                    (*new_controller).stick_average_y = 1.0;
-                                    (*new_controller).is_analog = false;
-                                } else if pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN != 0 {
-                                    (*new_controller).stick_average_y = -1.0;
-                                    (*new_controller).is_analog = false;
-                                }
-
-                                if pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT != 0 {
-                                    (*new_controller).stick_average_x = -1.0;
-                                    (*new_controller).is_analog = false;
-                                } else if pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT != 0 {
-                                    (*new_controller).stick_average_x = 1.0;
-                                    (*new_controller).is_analog = false;
-                                }
-
-                                let threshold = 0.5;
-                                process_xinput_digital_button(
-                                    if (*new_controller).stick_average_x < -threshold {
-                                        1
-                                    } else {
-                                        0
-                                    },
-                                    &(*old_controller).move_left,
-                                    1,
-                                    &mut (*new_controller).move_left,
-                                );
-                                process_xinput_digital_button(
-                                    if (*new_controller).stick_average_x > threshold {
-                                        1
-                                    } else {
-                                        0
-                                    },
-                                    &(*old_controller).move_right,
-                                    1,
-                                    &mut (*new_controller).move_right,
-                                );
-                                process_xinput_digital_button(
-                                    if (*new_controller).stick_average_y < -threshold {
-                                        1
-                                    } else {
-                                        0
-                                    },
-                                    &(*old_controller).move_down,
-                                    1,
-                                    &mut (*new_controller).move_down,
-                                );
-                                process_xinput_digital_button(
-                                    if (*new_controller).stick_average_x > threshold {
-                                        1
-                                    } else {
-                                        0
-                                    },
-                                    &(*old_controller).move_up,
-                                    1,
-                                    &mut (*new_controller).move_up,
-                                );
-
-                                process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &(*old_controller).action_down,
-                                    XINPUT_GAMEPAD_B,
-                                    &mut (*new_controller).action_down,
-                                );
-                                process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &(*old_controller).action_right,
-                                    XINPUT_GAMEPAD_A,
-                                    &mut (*new_controller).action_right,
-                                );
-                                process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &(*old_controller).action_left,
-                                    XINPUT_GAMEPAD_Y,
-                                    &mut (*new_controller).action_left,
-                                );
-                                process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &(*old_controller).action_up,
-                                    XINPUT_GAMEPAD_X,
-                                    &mut (*new_controller).action_up,
-                                );
-                                process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &(*old_controller).left_shoulder,
-                                    XINPUT_GAMEPAD_LEFT_SHOULDER,
-                                    &mut (*new_controller).left_shoulder,
-                                );
-                                process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &(*old_controller).right_shoulder,
-                                    XINPUT_GAMEPAD_RIGHT_SHOULDER,
-                                    &mut (*new_controller).right_shoulder,
-                                );
-
-                                process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &(*old_controller).start,
-                                    XINPUT_GAMEPAD_START,
-                                    &mut (*new_controller).start,
-                                );
-                                process_xinput_digital_button(
-                                    pad.wButtons,
-                                    &(*old_controller).select,
-                                    XINPUT_GAMEPAD_START,
-                                    &mut (*new_controller).select,
-                                );
-                            } else {
-                                (*new_controller).is_connected = false;
-                                trace!("controller is not available");
+                        if !GLOBAL_PAUSE {
+                            // TODO: Need to not poll disconnected controllers to avoid
+                            // xinput frame rate hit on older libraries...
+                            // TODO: should we poll this more frequently?
+                            let mut max_controller_count = XUSER_MAX_COUNT as usize;
+                            if max_controller_count > (new_input.controllers.len() - 1) {
+                                max_controller_count = new_input.controllers.len() - 1
                             }
-                        }
 
-                        let mut byte_to_lock = 0;
-                        let mut bytes_to_write = 0;
+                            for controller_index in 0..max_controller_count {
+                                let our_controller_index = controller_index + 1;
+                                let old_controller =
+                                    get_controller(&mut old_input, our_controller_index);
+                                let mut new_controller =
+                                    get_controller(&mut new_input, our_controller_index);
 
-                        byte_to_lock = (sound_output.running_sample_index
-                            * sound_output.bytes_per_sample)
-                            % sound_output.sound_buffer_size;
+                                let mut controller_state: XINPUT_STATE = zeroed();
+                                if XInputGetState(controller_index as u32, &mut controller_state)
+                                    == ERROR_SUCCESS
+                                {
+                                    (*new_controller).is_connected = true;
 
-                        let target_cursor = (last_play_cursor
-                            + (sound_output.latency_sample_count * sound_output.bytes_per_sample))
-                            % sound_output.sound_buffer_size;
-                        bytes_to_write = if byte_to_lock > target_cursor {
-                            (sound_output.sound_buffer_size - byte_to_lock) + target_cursor
-                        } else {
-                            target_cursor - byte_to_lock
-                        };
+                                    // controller is plugged in
+                                    let pad = controller_state.Gamepad;
 
-                        let mut sound_buffer = game::SoundOutputBuffer {
-                            samples_per_second: sound_output.samples_per_second,
-                            sample_count: bytes_to_write / sound_output.bytes_per_sample,
-                            samples,
-                        };
+                                    // TODO: This is a square deadzone, check XInput to
+                                    // verify that the deadzone is "round" and show how to do
+                                    // round deadzone processing.
+                                    (*new_controller).stick_average_x = process_xinput_stick_value(
+                                        pad.sThumbLX,
+                                        XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
+                                    );
+                                    (*new_controller).stick_average_y = process_xinput_stick_value(
+                                        pad.sThumbLY,
+                                        XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE,
+                                    );
+                                    if ((*new_controller).stick_average_x != 0.0)
+                                        || ((*new_controller).stick_average_y != 0.0)
+                                    {
+                                        (*new_controller).is_analog = true;
+                                    }
 
-                        let buffer = game::OffscreenBuffer {
-                            memory: GLOBAL_BACK_BUFFER.memory,
-                            width: GLOBAL_BACK_BUFFER.width,
-                            height: GLOBAL_BACK_BUFFER.height,
-                            pitch: GLOBAL_BACK_BUFFER.pitch,
-                            bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
-                        };
-                        game::update_and_render(
-                            &mut game_memory,
-                            &mut new_input,
-                            &buffer,
-                            &sound_buffer,
-                        );
+                                    if pad.wButtons & XINPUT_GAMEPAD_DPAD_UP != 0 {
+                                        (*new_controller).stick_average_y = 1.0;
+                                        (*new_controller).is_analog = false;
+                                    }
 
-                        if sound_is_valid && bytes_to_write > 0 {
-                            if cfg!(debug_assertions) {
+                                    if pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN != 0 {
+                                        (*new_controller).stick_average_y = -1.0;
+                                        (*new_controller).is_analog = false;
+                                    }
+
+                                    if pad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT != 0 {
+                                        (*new_controller).stick_average_x = -1.0;
+                                        (*new_controller).is_analog = false;
+                                    }
+
+                                    if pad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT != 0 {
+                                        (*new_controller).stick_average_x = 1.0;
+                                        (*new_controller).is_analog = false;
+                                    }
+
+                                    let threshold = 0.5;
+                                    process_xinput_digital_button(
+                                        if (*new_controller).stick_average_x < -threshold {
+                                            1
+                                        } else {
+                                            0
+                                        },
+                                        &(*old_controller).move_left,
+                                        1,
+                                        &mut (*new_controller).move_left,
+                                    );
+                                    process_xinput_digital_button(
+                                        if (*new_controller).stick_average_x > threshold {
+                                            1
+                                        } else {
+                                            0
+                                        },
+                                        &(*old_controller).move_right,
+                                        1,
+                                        &mut (*new_controller).move_right,
+                                    );
+                                    process_xinput_digital_button(
+                                        if (*new_controller).stick_average_y < -threshold {
+                                            1
+                                        } else {
+                                            0
+                                        },
+                                        &(*old_controller).move_down,
+                                        1,
+                                        &mut (*new_controller).move_down,
+                                    );
+                                    process_xinput_digital_button(
+                                        if (*new_controller).stick_average_x > threshold {
+                                            1
+                                        } else {
+                                            0
+                                        },
+                                        &(*old_controller).move_up,
+                                        1,
+                                        &mut (*new_controller).move_up,
+                                    );
+
+                                    // TODO: How to handle nintendo vs xbox controller differences?
+                                    process_xinput_digital_button(
+                                        pad.wButtons,
+                                        &(*old_controller).action_down,
+                                        XINPUT_GAMEPAD_B,
+                                        &mut (*new_controller).action_down,
+                                    );
+                                    process_xinput_digital_button(
+                                        pad.wButtons,
+                                        &(*old_controller).action_right,
+                                        XINPUT_GAMEPAD_A,
+                                        &mut (*new_controller).action_right,
+                                    );
+                                    process_xinput_digital_button(
+                                        pad.wButtons,
+                                        &(*old_controller).action_left,
+                                        XINPUT_GAMEPAD_Y,
+                                        &mut (*new_controller).action_left,
+                                    );
+                                    process_xinput_digital_button(
+                                        pad.wButtons,
+                                        &(*old_controller).action_up,
+                                        XINPUT_GAMEPAD_X,
+                                        &mut (*new_controller).action_up,
+                                    );
+                                    process_xinput_digital_button(
+                                        pad.wButtons,
+                                        &(*old_controller).left_shoulder,
+                                        XINPUT_GAMEPAD_LEFT_SHOULDER,
+                                        &mut (*new_controller).left_shoulder,
+                                    );
+                                    process_xinput_digital_button(
+                                        pad.wButtons,
+                                        &(*old_controller).right_shoulder,
+                                        XINPUT_GAMEPAD_RIGHT_SHOULDER,
+                                        &mut (*new_controller).right_shoulder,
+                                    );
+
+                                    process_xinput_digital_button(
+                                        pad.wButtons,
+                                        &(*old_controller).start,
+                                        XINPUT_GAMEPAD_START,
+                                        &mut (*new_controller).start,
+                                    );
+                                    process_xinput_digital_button(
+                                        pad.wButtons,
+                                        &(*old_controller).select,
+                                        XINPUT_GAMEPAD_START,
+                                        &mut (*new_controller).select,
+                                    );
+                                } else {
+                                    (*new_controller).is_connected = false;
+                                    trace!("controller is not available");
+                                }
+                            }
+
+                            let buffer = game::OffscreenBuffer {
+                                memory: GLOBAL_BACK_BUFFER.memory,
+                                width: GLOBAL_BACK_BUFFER.width,
+                                height: GLOBAL_BACK_BUFFER.height,
+                                pitch: GLOBAL_BACK_BUFFER.pitch,
+                                bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
+                            };
+                            game::update_and_render(&mut game_memory, &mut new_input, &buffer);
+
+                            let audio_wall_clock = get_wall_clock();
+                            let from_begin_to_audio_seconds =
+                                get_seconds_elapsed(flip_wall_clock, audio_wall_clock);
+
+                            let mut play_cursor = zeroed();
+                            let mut write_cursor = zeroed();
+                            match (*GLOBAL_SOUND_BUFFER)
+                                .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
+                            {
+                                DS_OK => {
+                                    /* Here is how sound output computation works.
+                                        We define a safety value that is the number
+                                        of samples we think our game update loop
+                                        may vary by (let's say up to 2ms)
+
+                                        When we wake up to write audio, we will look
+                                        and see what the play cursor position is and we
+                                        will forecast ahead where we think the play
+                                        cursor will be on the next frame boundary.
+                                        We will then look to see if the write cursor is
+                                        before that by at least our safety value.  If
+                                        it is, the target fill position is that frame
+                                        boundary plus one frame.  This gives us perfect
+                                        audio sync in the case of a card that has low
+                                        enough latency.
+                                        If the write cursor is _after_ that safety
+                                        margin, then we assume we can never sync the
+                                        audio perfectly, so we will write one frame's
+                                        worth of audio plus the safety margin's worth
+                                        of guard samples.
+                                    */
+                                    if !sound_is_valid {
+                                        sound_output.running_sample_index =
+                                            write_cursor / sound_output.bytes_per_sample;
+                                        sound_is_valid = true;
+                                    }
+
+                                    let byte_to_lock = (sound_output.running_sample_index
+                                        * sound_output.bytes_per_sample)
+                                        % sound_output.sound_buffer_size;
+
+                                    let expected_sound_bytes_per_frame = ((sound_output
+                                        .samples_per_second
+                                        * sound_output.bytes_per_sample)
+                                        as f32
+                                        / game_update_hz)
+                                        as u32;
+
+                                    let seconds_left_until_flip =
+                                        target_seconds_per_frame - from_begin_to_audio_seconds;
+                                    let expected_bytes_until_flip = ((seconds_left_until_flip
+                                        / target_seconds_per_frame)
+                                        * expected_sound_bytes_per_frame as f32)
+                                        as u32;
+                                    let expected_frame_boundary_byte =
+                                        play_cursor.wrapping_add(expected_bytes_until_flip);
+
+                                    let mut safe_write_cursor = write_cursor;
+                                    if safe_write_cursor < play_cursor {
+                                        safe_write_cursor += sound_output.sound_buffer_size;
+                                    }
+                                    debug_assert!(safe_write_cursor >= play_cursor);
+                                    safe_write_cursor += sound_output.safety_bytes;
+
+                                    let audio_card_is_low_latency =
+                                        safe_write_cursor < expected_frame_boundary_byte;
+
+                                    let target_cursor = if audio_card_is_low_latency {
+                                        expected_frame_boundary_byte
+                                            .wrapping_add(expected_sound_bytes_per_frame)
+                                    } else {
+                                        write_cursor
+                                            + expected_sound_bytes_per_frame
+                                            + sound_output.safety_bytes
+                                    } % sound_output.sound_buffer_size;
+
+                                    let bytes_to_write = if byte_to_lock > target_cursor {
+                                        (sound_output.sound_buffer_size - byte_to_lock)
+                                            + target_cursor
+                                    } else {
+                                        target_cursor - byte_to_lock
+                                    };
+
+                                    let mut sound_buffer = game::SoundOutputBuffer {
+                                        samples_per_second: sound_output.samples_per_second,
+                                        sample_count: bytes_to_write
+                                            / sound_output.bytes_per_sample,
+                                        samples,
+                                    };
+                                    game::get_sound_samples(&game_memory, &sound_buffer);
+
+                                    #[cfg(debug_assertions)]
+                                    {
+                                        let mut marker =
+                                            &mut debug_time_markers[debug_time_marker_index];
+                                        marker.output_play_cursor = play_cursor;
+                                        marker.output_write_cursor = write_cursor;
+                                        marker.output_location = byte_to_lock;
+                                        marker.output_byte_count = bytes_to_write;
+                                        marker.expected_flip_play_cursor =
+                                            expected_frame_boundary_byte;
+                                    }
+
+                                    let mut unwrapped_write_cursor = write_cursor;
+                                    if unwrapped_write_cursor < play_cursor {
+                                        unwrapped_write_cursor += sound_output.sound_buffer_size;
+                                    }
+                                    audio_latency_bytes = unwrapped_write_cursor - play_cursor;
+                                    audio_latency_seconds = (audio_latency_bytes
+                                        / sound_output.bytes_per_sample)
+                                        / sound_output.samples_per_second;
+
+                                    trace!(
+                                        "BTL:{} TC:{} BTW:{} - PC:{} WC:{} DELTA:{} ({}s)",
+                                        byte_to_lock,
+                                        target_cursor,
+                                        bytes_to_write,
+                                        play_cursor,
+                                        write_cursor,
+                                        audio_latency_bytes,
+                                        audio_latency_seconds
+                                    );
+
+                                    fill_sound_buffer(
+                                        &mut sound_output,
+                                        byte_to_lock,
+                                        bytes_to_write,
+                                        &mut sound_buffer,
+                                    );
+                                }
+                                e => {
+                                    warn!("Sound invalid: {}", e);
+                                    sound_is_valid = false;
+                                }
+                            }
+
+                            let work_counter = get_wall_clock();
+                            let work_seconds_elapsed =
+                                get_seconds_elapsed(last_counter, work_counter);
+
+                            // TODO: NOT TESTED YET! PROBABLY BUGGY!!!
+                            let mut seconds_elapsed_for_frame = work_seconds_elapsed;
+                            if seconds_elapsed_for_frame < target_seconds_per_frame {
+                                if sleep_is_granular {
+                                    let sleep_ms = 1000.0
+                                        * (target_seconds_per_frame - seconds_elapsed_for_frame);
+                                    if sleep_ms > 0.0 {
+                                        Sleep(sleep_ms as u32);
+                                    }
+                                }
+
+                                let test_seconds_elapsed_for_frame =
+                                    get_seconds_elapsed(last_counter, get_wall_clock());
+                                if test_seconds_elapsed_for_frame < target_seconds_per_frame {
+                                    warn!("missed sleep");
+                                }
+
+                                while seconds_elapsed_for_frame < target_seconds_per_frame {
+                                    seconds_elapsed_for_frame =
+                                        get_seconds_elapsed(last_counter, get_wall_clock());
+                                }
+                            } else {
+                                trace!("missed frame rate");
+                            }
+
+                            let end_counter = get_wall_clock();
+                            let ms_per_frame =
+                                1000.0 * get_seconds_elapsed(last_counter, end_counter);
+                            last_counter = end_counter;
+
+                            let dimension = get_window_dimension(window);
+                            #[cfg(debug_assertions)]
+                            {
+                                // TODO: current is wrong on the zero'th index
+                                debug_sync_display(
+                                    &GLOBAL_BACK_BUFFER,
+                                    &mut debug_time_markers,
+                                    debug_time_marker_index as isize - 1,
+                                    &sound_output,
+                                )
+                            }
+                            display_buffer_in_window(
+                                &GLOBAL_BACK_BUFFER,
+                                device_context,
+                                dimension.width,
+                                dimension.height,
+                            );
+
+                            flip_wall_clock = get_wall_clock();
+
+                            #[cfg(debug_assertions)]
+                            {
                                 let mut play_cursor = zeroed();
                                 let mut write_cursor = zeroed();
-                                (*GLOBAL_SOUND_BUFFER)
-                                    .GetCurrentPosition(&mut play_cursor, &mut write_cursor);
-                                println!(
-                                    "LPC:{} BTL:{} TC:{} BTW:{} - PC:{} WC:{}",
-                                    last_play_cursor,
-                                    byte_to_lock,
-                                    target_cursor,
-                                    bytes_to_write,
-                                    play_cursor,
-                                    write_cursor
-                                );
-                            }
-                            fill_sound_buffer(
-                                &mut sound_output,
-                                byte_to_lock,
-                                bytes_to_write,
-                                &mut sound_buffer,
-                            );
-                        }
-
-                        let work_counter = get_wall_clock();
-                        let work_seconds_elapsed = get_seconds_elapsed(last_counter, work_counter);
-
-                        // TODO: NOT TESTED YET! PROBABLY BUGGY!!!
-                        let mut seconds_elapsed_for_frame = work_seconds_elapsed;
-                        if seconds_elapsed_for_frame < target_seconds_per_frame {
-                            if sleep_is_granular {
-                                let sleep_ms = (1000.0
-                                    * (target_seconds_per_frame - seconds_elapsed_for_frame))
-                                    as DWORD;
-                                if sleep_ms > 0 {
-                                    Sleep(sleep_ms);
+                                if (*GLOBAL_SOUND_BUFFER)
+                                    .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
+                                    == DS_OK
+                                {
+                                    debug_assert!(
+                                        debug_time_marker_index < debug_time_markers.len()
+                                    );
+                                    let mut marker =
+                                        &mut debug_time_markers[debug_time_marker_index];
+                                    marker.flip_play_cursor = play_cursor;
+                                    marker.flip_write_cursor = write_cursor;
                                 }
                             }
 
-                            let test_seconds_elapsed_for_frame =
-                                get_seconds_elapsed(last_counter, get_wall_clock());
-                            debug_assert!(
-                                test_seconds_elapsed_for_frame < target_seconds_per_frame
-                            );
+                            std::mem::swap(&mut new_input, &mut old_input);
 
-                            while seconds_elapsed_for_frame < target_seconds_per_frame {
-                                seconds_elapsed_for_frame =
-                                    get_seconds_elapsed(last_counter, get_wall_clock());
-                            }
-                        } else {
-                            trace!("missed frame rate");
-                        }
+                            let fps = 0.0;
 
-                        let end_counter = get_wall_clock();
-                        let ms_per_frame = 1000.0 * get_seconds_elapsed(last_counter, end_counter);
-                        last_counter = end_counter;
+                            trace!("{}ms/f, {}f/s", ms_per_frame, fps);
 
-                        let dimension = get_window_dimension(window);
-                        if cfg!(debug_assertions) {
-                            debug_sync_display(
-                                &GLOBAL_BACK_BUFFER,
-                                debug_time_markers.len(),
-                                &mut debug_time_markers,
-                                &sound_output,
-                                target_seconds_per_frame,
-                            )
-                        }
-                        display_buffer_in_window(
-                            &GLOBAL_BACK_BUFFER,
-                            device_context,
-                            dimension.width,
-                            dimension.height,
-                        );
-
-                        let mut play_cursor = zeroed();
-                        let mut write_cursor = zeroed();
-                        match (*GLOBAL_SOUND_BUFFER)
-                            .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
-                        {
-                            DS_OK => {
-                                last_play_cursor = play_cursor;
-                                if !sound_is_valid {
-                                    sound_output.running_sample_index =
-                                        write_cursor / sound_output.bytes_per_sample;
-                                    sound_is_valid = true;
+                            #[cfg(debug_assertions)]
+                            {
+                                debug_time_marker_index += 1;
+                                if debug_time_marker_index == debug_time_markers.len() {
+                                    debug_time_marker_index = 0;
                                 }
                             }
-                            e => {
-                                warn!("Sound invalid: {}", e);
-                                sound_is_valid = false;
-                            }
                         }
-
-                        if cfg!(debug_assertions) {
-                            let len = debug_time_markers.len();
-                            let mut marker = &mut debug_time_markers[debug_time_marker_index];
-                            debug_time_marker_index += 1;
-                            if debug_time_marker_index >= len {
-                                debug_time_marker_index = 0;
-                            }
-                            marker.play_cursor = play_cursor;
-                            marker.write_cursor = write_cursor;
-                        }
-
-                        std::mem::swap(&mut new_input, &mut old_input);
-
-                        let fps = 0.0;
-
-                        trace!("{}ms/f, {}f/s", ms_per_frame, fps);
                     }
                 } else {
                     error!(

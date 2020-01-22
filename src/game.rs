@@ -73,21 +73,17 @@ pub struct State {
 }
 
 // services that the game provides to the platform layer
-pub unsafe fn update_and_render(
-    memory: &mut Memory,
-    input: &mut Input,
-    buffer: &OffscreenBuffer,
-    sound_buffer: &SoundOutputBuffer,
-) {
+pub unsafe fn update_and_render(memory: &mut Memory, input: &mut Input, buffer: &OffscreenBuffer) {
     debug_assert!(std::mem::size_of::<State>() <= memory.permanent_storage_size);
 
+    #[allow(clippy::cast_ptr_alignment)]
     let game_state = memory.permanent_storage as *mut State;
 
     if !memory.is_initialized {
         let contents = std::fs::read_to_string(file!()).expect("could not read file");
         std::fs::write("test.out", contents).expect("could not write file");
 
-        (*game_state).tone_hz = 256;
+        (*game_state).tone_hz = 512;
         memory.is_initialized = true;
     }
 
@@ -96,7 +92,7 @@ pub unsafe fn update_and_render(
         if (*controller).is_analog {
             trace!("use analog movement tuning");
             (*game_state).blue_offset += (4.0 * (*controller).stick_average_x) as i32;
-            (*game_state).tone_hz = (256.0 + 128.0 * (*controller).stick_average_y) as u32;
+            (*game_state).tone_hz = (512.0 + 128.0 * (*controller).stick_average_y) as u32;
         } else {
             trace!("use digital movement tuning");
 
@@ -114,12 +110,21 @@ pub unsafe fn update_and_render(
         }
     }
 
-    output_sound(sound_buffer, (*game_state).tone_hz);
     render_weird_gradient(
         buffer,
         (*game_state).blue_offset,
         (*game_state).green_offset,
     );
+}
+
+// At the moment, this has to be a very fast function, it cannot be
+// more than a millisecond or so.
+// TODO: Reduce the pressure on this function's performance by measuring it
+// or asking about it, etc.
+pub fn get_sound_samples(memory: &Memory, sound_buffer: &SoundOutputBuffer) {
+    #[allow(clippy::cast_ptr_alignment)]
+    let game_state = memory.permanent_storage as *mut State;
+    unsafe { output_sound(sound_buffer, (*game_state).tone_hz) };
 }
 
 // TODO: platform independent code should get priority for removing unsafe

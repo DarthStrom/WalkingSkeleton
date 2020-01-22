@@ -4,8 +4,8 @@ use winapi::{
     ctypes::c_void,
     shared::{minwindef::LRESULT, minwindef::*, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
     um::{
-        dsound::*, libloaderapi::GetModuleHandleW, memoryapi::*, profileapi::*, wingdi::*,
-        winnt::*, winuser::*, xinput::*,
+        dsound::*, libloaderapi::GetModuleHandleW, memoryapi::*, mmsystem::*, profileapi::*,
+        synchapi::*, timeapi::*, wingdi::*, winnt::*, winuser::*, xinput::*,
     },
 };
 
@@ -42,6 +42,7 @@ struct SoundOutput {
 }
 
 static mut GLOBAL_RUNNING: bool = true;
+static mut GLOBAL_PERF_COUNT_FREQUENCY: i64 = 0;
 static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
 static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     info: BITMAPINFO {
@@ -454,11 +455,28 @@ unsafe fn process_pending_messages(keyboard_controller: &mut game::ControllerInp
     }
 }
 
+fn get_wall_clock() -> LARGE_INTEGER {
+    let mut result = LARGE_INTEGER::default();
+    unsafe {
+        QueryPerformanceCounter(&mut result);
+    }
+    result
+}
+
+fn get_seconds_elapsed(start: LARGE_INTEGER, end: LARGE_INTEGER) -> f32 {
+    unsafe { (end.QuadPart() - start.QuadPart()) as f32 / GLOBAL_PERF_COUNT_FREQUENCY as f32 }
+}
+
 pub fn main() {
     unsafe {
         let mut performance_count_frequency_result = zeroed();
         QueryPerformanceFrequency(&mut performance_count_frequency_result);
-        let performance_count_frequency = *performance_count_frequency_result.QuadPart();
+        GLOBAL_PERF_COUNT_FREQUENCY = *performance_count_frequency_result.QuadPart();
+
+        // Set the Windows scheduler granularity to 1ms
+        // so that our Sleep() can be more granular
+        let desired_scheduler_ms = 1;
+        let sleep_is_granular = timeBeginPeriod(desired_scheduler_ms) == TIMERR_NOERROR;
 
         let window_class = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
@@ -474,6 +492,11 @@ pub fn main() {
         };
 
         resize_dib_section(&mut GLOBAL_BACK_BUFFER, 1280, 720);
+
+        // TODO: How do we reliably query this on Windows?
+        let monitor_refresh_hz = 60;
+        let game_update_hz = monitor_refresh_hz / 2;
+        let target_seconds_per_frame = 1.0 / game_update_hz as f32;
 
         if RegisterClassW(&window_class) > 0 {
             let window = CreateWindowExW(
@@ -555,8 +578,7 @@ pub fn main() {
                     let mut new_input: game::Input = zeroed();
                     let mut old_input: game::Input = zeroed();
 
-                    let mut last_counter: LARGE_INTEGER = zeroed();
-                    QueryPerformanceCounter(&mut last_counter);
+                    let mut last_counter = get_wall_clock();
                     while GLOBAL_RUNNING {
                         let old_keyboard_controller = get_controller(&mut old_input, 0);
                         let new_keyboard_controller = get_controller(&mut new_input, 0);
@@ -778,6 +800,8 @@ pub fn main() {
                             }
                         };
 
+                        // TODO: Sound is wrong because we haven't updated
+                        // it to go with the frame loop
                         let mut sound_buffer = game::SoundOutputBuffer {
                             samples_per_second: sound_output.samples_per_second,
                             sample_count: bytes_to_write / sound_output.bytes_per_sample,
@@ -798,7 +822,6 @@ pub fn main() {
                             &sound_buffer,
                         );
 
-                        // direct sound output test
                         if sound_is_valid && bytes_to_write > 0 {
                             fill_sound_buffer(
                                 &mut sound_output,
@@ -806,6 +829,35 @@ pub fn main() {
                                 bytes_to_write,
                                 &mut sound_buffer,
                             );
+                        }
+
+                        let work_counter = get_wall_clock();
+                        let work_seconds_elapsed = get_seconds_elapsed(last_counter, work_counter);
+
+                        // TODO: NOT TESTED YET! PROBABLY BUGGY!!!
+                        let mut seconds_elapsed_for_frame = work_seconds_elapsed;
+                        if seconds_elapsed_for_frame < target_seconds_per_frame {
+                            if sleep_is_granular {
+                                let sleep_ms = (1000.0
+                                    * (target_seconds_per_frame - seconds_elapsed_for_frame))
+                                    as DWORD;
+                                if sleep_ms > 0 {
+                                    Sleep(sleep_ms);
+                                }
+                            }
+
+                            let test_seconds_elapsed_for_frame =
+                                get_seconds_elapsed(last_counter, get_wall_clock());
+                            debug_assert!(
+                                test_seconds_elapsed_for_frame < target_seconds_per_frame
+                            );
+
+                            while seconds_elapsed_for_frame < target_seconds_per_frame {
+                                seconds_elapsed_for_frame =
+                                    get_seconds_elapsed(last_counter, get_wall_clock());
+                            }
+                        } else {
+                            warn!("missed frame rate");
                         }
 
                         let dimension = get_window_dimension(window);
@@ -816,19 +868,15 @@ pub fn main() {
                             dimension.height,
                         );
 
-                        let mut end_counter: LARGE_INTEGER = zeroed();
-                        QueryPerformanceCounter(&mut end_counter);
+                        std::mem::swap(&mut new_input, &mut old_input);
 
-                        let counter_elapsed = end_counter.QuadPart() - last_counter.QuadPart();
-                        trace!(
-                            "{}ms/f, {}f/s",
-                            1000 * counter_elapsed / performance_count_frequency,
-                            performance_count_frequency / counter_elapsed
-                        );
-
+                        let end_counter = get_wall_clock();
+                        let ms_per_frame = 1000.0 * get_seconds_elapsed(last_counter, end_counter);
                         last_counter = end_counter;
 
-                        std::mem::swap(&mut new_input, &mut old_input);
+                        let fps = 0.0;
+
+                        trace!("{}ms/f, {}f/s", ms_per_frame, fps);
                     }
                 } else {
                     error!(

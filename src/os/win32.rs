@@ -1,11 +1,13 @@
-use crate::game;
-use std::{ffi::OsStr, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
+//! equivalent to win32_handmade.cpp
+
+use crate::common::*;
+use std::{ffi::*, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
     ctypes::c_void,
     shared::{minwindef::LRESULT, minwindef::*, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
     um::{
-        dsound::*, libloaderapi::GetModuleHandleW, memoryapi::*, mmsystem::*, profileapi::*,
-        synchapi::*, timeapi::*, wingdi::*, winnt::*, winuser::*, xinput::*,
+        dsound::*, libloaderapi::*, memoryapi::*, mmsystem::*, profileapi::*, synchapi::*,
+        timeapi::*, winbase::*, wingdi::*, winnt::*, winuser::*, xinput::*,
     },
 };
 
@@ -88,32 +90,102 @@ static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     bytes_per_pixel: 4,
 };
 
-pub unsafe fn get_controller(
-    input: *mut game::Input,
-    controller_index: usize,
-) -> *mut game::ControllerInput {
-    debug_assert!(controller_index < (*input).controllers.len());
-    &mut (*input).controllers[controller_index]
-}
-
 fn win32_string(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(once(0)).collect()
 }
 
-fn kilobytes(bytes: usize) -> usize {
-    bytes * 1024
+struct State {
+    exe_file_name: [u16; MAX_PATH],
+    one_past_last_exe_file_name_slash: usize,
 }
 
-fn megabytes(bytes: usize) -> usize {
-    1024 * kilobytes(bytes)
+unsafe fn get_exe_file_name(state: &mut State) {
+    let _ = GetModuleFileNameW(
+        null_mut(),
+        &mut state.exe_file_name[0],
+        state.exe_file_name.len() as DWORD,
+    );
+    let mut scan = 0;
+    while state.exe_file_name[scan] != 0 {
+        if state.exe_file_name[scan] == ('\\' as u16) {
+            state.one_past_last_exe_file_name_slash = scan + 1;
+        }
+        scan += 1;
+    }
 }
 
-fn gigabytes(bytes: usize) -> usize {
-    1024 * megabytes(bytes)
+unsafe fn build_exe_path_file_name(state: &State, file_name: &str, dest: &mut [u16; MAX_PATH]) {
+    let file_name_w = win32_string(file_name);
+    let mut i = 0;
+    while i < state.one_past_last_exe_file_name_slash {
+        dest[i] = state.exe_file_name[i];
+        i += 1;
+    }
+    for u in file_name_w {
+        dest[i] = u;
+        i += 1;
+    }
 }
 
-fn terabytes(bytes: usize) -> usize {
-    1024 * gigabytes(bytes)
+struct GameCode {
+    game_code_dll: HMODULE,
+    update_and_render: GameUpdateAndRender,
+    get_sound_samples: GameGetSoundSamples,
+    is_valid: bool,
+}
+
+unsafe fn load_game_code(
+    source_dll_path: &[u16; MAX_PATH],
+    temp_dll_path: &[u16; MAX_PATH],
+) -> GameCode {
+    trace!("==load_game_code==");
+    let mut result: GameCode = zeroed();
+
+    // TODO: Automatic determination of when updates are necessary.
+
+    CopyFileW(source_dll_path.as_ptr(), temp_dll_path.as_ptr(), FALSE);
+    result.game_code_dll = LoadLibraryW(temp_dll_path.as_ptr());
+    if !result.game_code_dll.is_null() {
+        let c_update_and_render = CString::new("update_and_render").unwrap();
+        let c_get_sound_samples = CString::new("get_sound_samples").unwrap();
+
+        let update_and_render_ptr =
+            GetProcAddress(result.game_code_dll, c_update_and_render.as_ptr());
+        let get_sound_samples_ptr =
+            GetProcAddress(result.game_code_dll, c_get_sound_samples.as_ptr());
+
+        result.update_and_render = transmute(update_and_render_ptr);
+        result.get_sound_samples = transmute(get_sound_samples_ptr);
+        result.is_valid = !update_and_render_ptr.is_null() && !get_sound_samples_ptr.is_null();
+        if result.is_valid {
+            trace!("successfully loaded game functions")
+        } else {
+            error!("could not get the function pointers");
+            result.update_and_render = zeroed();
+            result.get_sound_samples = zeroed();
+        }
+    } else {
+        error!("could not load game code dll");
+    }
+
+    trace!("==load_game_code DONE==");
+    result
+}
+
+unsafe fn unload_game_code(game_code: &mut GameCode) {
+    trace!("==unload_game_code==");
+    if !game_code.game_code_dll.is_null() {
+        FreeLibrary(game_code.game_code_dll);
+        game_code.game_code_dll = zeroed();
+    } else {
+        warn!("dll memory was already null...")
+    }
+    game_code.is_valid = false;
+
+    // These lines will crash the program in release mode
+    // game_code.update_and_render = zeroed();
+    // game_code.get_sound_samples = zeroed();
+    trace!("==unload_game_code DONE==")
 }
 
 // TODO: investigate XAudio2
@@ -313,7 +385,7 @@ unsafe fn fill_sound_buffer(
     sound_output: &mut SoundOutput,
     byte_to_lock: u32,
     bytes_to_write: u32,
-    source_buffer: &mut game::SoundOutputBuffer,
+    source_buffer: &mut GameSoundOutputBuffer,
 ) {
     let mut region1 = zeroed();
     let mut region1_size = zeroed();
@@ -358,7 +430,7 @@ unsafe fn fill_sound_buffer(
     }
 }
 
-fn process_keyboard_message(new_state: &mut game::ButtonState, is_down: bool) {
+fn process_keyboard_message(new_state: &mut GameButtonState, is_down: bool) {
     if new_state.ended_down != is_down {
         new_state.ended_down = is_down;
         new_state.half_transition_count += 1;
@@ -368,9 +440,9 @@ fn process_keyboard_message(new_state: &mut game::ButtonState, is_down: bool) {
 
 fn process_xinput_digital_button(
     xinput_button_state: WORD,
-    old_state: &game::ButtonState,
+    old_state: &GameButtonState,
     button_bit: WORD,
-    new_state: &mut game::ButtonState,
+    new_state: &mut GameButtonState,
 ) {
     new_state.ended_down = (xinput_button_state & button_bit) == button_bit;
     new_state.half_transition_count = if old_state.ended_down != new_state.ended_down {
@@ -392,7 +464,7 @@ fn process_xinput_stick_value(value: SHORT, dead_zone_threshold: SHORT) -> f32 {
     result
 }
 
-unsafe fn process_pending_messages(keyboard_controller: &mut game::ControllerInput) {
+unsafe fn process_pending_messages(keyboard_controller: &mut GameControllerInput) {
     let mut message = zeroed();
     while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
         match message.message {
@@ -665,12 +737,21 @@ unsafe fn debug_sync_display(
     }
 }
 
+// TODO: refactor me
 #[allow(clippy::cognitive_complexity)]
 pub fn main() {
     unsafe {
+        let mut state = zeroed();
+
         let mut performance_count_frequency_result = zeroed();
         QueryPerformanceFrequency(&mut performance_count_frequency_result);
         GLOBAL_PERF_COUNT_FREQUENCY = *performance_count_frequency_result.QuadPart();
+
+        get_exe_file_name(&mut state);
+        let mut source_game_code_dll_full_path: [u16; MAX_PATH] = [0; MAX_PATH];
+        build_exe_path_file_name(&state, "game.dll", &mut source_game_code_dll_full_path);
+        let mut temp_game_code_dll_full_path: [u16; MAX_PATH] = [0; MAX_PATH];
+        build_exe_path_file_name(&state, "game_temp.dll", &mut temp_game_code_dll_full_path);
 
         // Set the Windows scheduler granularity to 1ms
         // so that our Sleep() can be more granular
@@ -767,7 +848,7 @@ pub fn main() {
                 } else {
                     null_mut::<VOID>()
                 };
-                let mut game_memory: game::Memory = zeroed();
+                let mut game_memory: GameMemory = zeroed();
                 game_memory.permanent_storage_size = megabytes(64);
                 game_memory.transient_storage_size = gigabytes(1);
 
@@ -787,8 +868,8 @@ pub fn main() {
                     && !game_memory.permanent_storage.is_null()
                     && !game_memory.transient_storage.is_null()
                 {
-                    let mut new_input: game::Input = zeroed();
-                    let mut old_input: game::Input = zeroed();
+                    let mut new_input: GameInput = zeroed();
+                    let mut old_input: GameInput = zeroed();
 
                     let mut last_counter = get_wall_clock();
                     let mut flip_wall_clock = get_wall_clock();
@@ -800,7 +881,23 @@ pub fn main() {
                     let mut audio_latency_seconds;
                     let mut sound_is_valid = false;
 
+                    let mut game = load_game_code(
+                        &source_game_code_dll_full_path,
+                        &temp_game_code_dll_full_path,
+                    );
+                    let mut load_counter = 0;
+
                     while GLOBAL_RUNNING {
+                        if load_counter > 120 {
+                            unload_game_code(&mut game);
+                            game = load_game_code(
+                                &source_game_code_dll_full_path,
+                                &temp_game_code_dll_full_path,
+                            );
+                            load_counter = 0;
+                        }
+                        load_counter += 1;
+
                         let old_keyboard_controller = get_controller(&mut old_input, 0);
                         let new_keyboard_controller = get_controller(&mut new_input, 0);
                         *new_keyboard_controller = zeroed();
@@ -997,14 +1094,14 @@ pub fn main() {
                                 }
                             }
 
-                            let buffer = game::OffscreenBuffer {
+                            let mut buffer = GameOffscreenBuffer {
                                 memory: GLOBAL_BACK_BUFFER.memory,
                                 width: GLOBAL_BACK_BUFFER.width,
                                 height: GLOBAL_BACK_BUFFER.height,
                                 pitch: GLOBAL_BACK_BUFFER.pitch,
                                 bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
                             };
-                            game::update_and_render(&mut game_memory, &mut new_input, &buffer);
+                            (game.update_and_render)(&mut game_memory, &mut new_input, &mut buffer);
 
                             let audio_wall_clock = get_wall_clock();
                             let from_begin_to_audio_seconds =
@@ -1089,13 +1186,13 @@ pub fn main() {
                                         target_cursor - byte_to_lock
                                     };
 
-                                    let mut sound_buffer = game::SoundOutputBuffer {
+                                    let mut sound_buffer = GameSoundOutputBuffer {
                                         samples_per_second: sound_output.samples_per_second,
                                         sample_count: bytes_to_write
                                             / sound_output.bytes_per_sample,
                                         samples,
                                     };
-                                    game::get_sound_samples(&game_memory, &sound_buffer);
+                                    (game.get_sound_samples)(&mut game_memory, &mut sound_buffer);
 
                                     #[cfg(debug_assertions)]
                                     {

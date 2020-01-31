@@ -6,9 +6,9 @@ use winapi::{
     ctypes::c_void,
     shared::{minwindef::LRESULT, minwindef::*, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
     um::{
-        dsound::*, fileapi::*, libloaderapi::*, memoryapi::*, minwinbase::*, mmsystem::*,
-        profileapi::*, synchapi::*, timeapi::*, winbase::*, wingdi::*, winnt::*, winuser::*,
-        xinput::*,
+        dsound::*, fileapi::*, handleapi::CloseHandle, libloaderapi::*, memoryapi::*,
+        minwinbase::*, mmsystem::*, profileapi::*, synchapi::*, timeapi::*, winbase::*, wingdi::*,
+        winnt::*, winuser::*, xinput::*,
     },
 };
 
@@ -22,6 +22,7 @@ const VK_D: i32 = 'D' as i32;
 const VK_Q: i32 = 'Q' as i32;
 const VK_E: i32 = 'E' as i32;
 const VK_P: i32 = 'P' as i32;
+const VK_L: i32 = 'L' as i32;
 
 struct OffscreenBuffer {
     info: BITMAPINFO,
@@ -95,11 +96,6 @@ fn win32_string(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(once(0)).collect()
 }
 
-struct State {
-    exe_file_name: [u16; MAX_PATH],
-    one_past_last_exe_file_name_slash: usize,
-}
-
 unsafe fn get_exe_file_name(state: &mut State) {
     let _ = GetModuleFileNameW(
         null_mut(),
@@ -134,6 +130,17 @@ struct GameCode {
     update_and_render: GameUpdateAndRender,
     get_sound_samples: GameGetSoundSamples,
     is_valid: bool,
+}
+
+struct State {
+    total_size: usize,
+    game_memory_block: *mut u8,
+    recording_handle: HANDLE,
+    input_recording_index: usize,
+    playback_handle: HANDLE,
+    input_playing_index: usize,
+    exe_file_name: [u16; MAX_PATH],
+    one_past_last_exe_file_name_slash: usize,
 }
 
 unsafe fn get_last_write_time(filename: &[u16; MAX_PATH]) -> FILETIME {
@@ -342,7 +349,13 @@ unsafe extern "system" fn main_window_callback(
     let dimension = get_window_dimension(window);
 
     match message {
-        WM_ACTIVATEAPP => trace!("WM_ACTIVATEAPP"),
+        WM_ACTIVATEAPP => {
+            if w_param > 0 {
+                SetLayeredWindowAttributes(window, RGB(0, 0, 0), 255, LWA_ALPHA);
+            } else {
+                SetLayeredWindowAttributes(window, RGB(0, 0, 0), 64, LWA_ALPHA);
+            }
+        }
         WM_CLOSE | WM_DESTROY => GLOBAL_RUNNING = false,
         WM_KEYUP | WM_KEYDOWN => panic!("Keyboard input came in through a non-dispatch message!"),
         WM_PAINT => {
@@ -480,7 +493,109 @@ fn process_xinput_stick_value(value: SHORT, dead_zone_threshold: SHORT) -> f32 {
     result
 }
 
-unsafe fn process_pending_messages(keyboard_controller: &mut GameControllerInput) {
+unsafe fn begin_recording_input(state: &mut State, input_recording_index: usize) {
+    state.input_recording_index = input_recording_index;
+    // TODO: these files must go in a temporary/build directory
+    // TODO: lazily write the giant memory block and use a memory copy instead?
+
+    let file_name = win32_string("foo.rec");
+    state.recording_handle = CreateFileW(
+        file_name.as_ptr(),
+        GENERIC_WRITE,
+        0,
+        null_mut(),
+        CREATE_ALWAYS,
+        0,
+        null_mut(),
+    );
+
+    let bytes_to_write = state.total_size;
+    let mut bytes_written = zeroed();
+    WriteFile(
+        state.recording_handle,
+        state.game_memory_block as *mut c_void,
+        bytes_to_write as u32,
+        &mut bytes_written,
+        null_mut(),
+    );
+}
+
+unsafe fn end_recording_input(state: &mut State) {
+    CloseHandle(state.recording_handle);
+    state.input_recording_index = 0;
+}
+
+unsafe fn begin_input_playback(state: &mut State, input_playing_index: usize) {
+    state.input_playing_index = input_playing_index;
+
+    let file_name = win32_string("foo.rec");
+    state.playback_handle = CreateFileW(
+        file_name.as_ptr(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        null_mut(),
+        OPEN_EXISTING,
+        0,
+        null_mut(),
+    );
+
+    let bytes_to_read = state.total_size;
+    let mut bytes_read = zeroed();
+    ReadFile(
+        state.playback_handle,
+        state.game_memory_block as *mut c_void,
+        bytes_to_read as u32,
+        &mut bytes_read,
+        null_mut(),
+    );
+}
+
+unsafe fn end_input_playback(state: &mut State) {
+    CloseHandle(state.playback_handle);
+    state.input_playing_index = 0;
+}
+
+unsafe fn record_input(state: &mut State, new_input: *mut GameInput) {
+    let mut bytes_written = 0;
+    WriteFile(
+        state.recording_handle,
+        new_input as *mut c_void,
+        size_of::<GameInput>() as u32,
+        &mut bytes_written,
+        null_mut(),
+    );
+}
+
+unsafe fn play_back_input(state: &mut State, new_input: *mut GameInput) {
+    let mut bytes_read = 0;
+    if ReadFile(
+        state.playback_handle,
+        new_input as *mut c_void,
+        size_of::<GameInput>() as u32,
+        &mut bytes_read,
+        null_mut(),
+    ) != 0
+    {
+        if bytes_read == 0 {
+            // We've hit the end of the stream, go back to the beginning
+            let playing_index = state.input_playing_index;
+            end_input_playback(state);
+            begin_input_playback(state, playing_index);
+            ReadFile(
+                state.playback_handle,
+                new_input as *mut c_void,
+                size_of::<GameInput>() as u32,
+                &mut bytes_read,
+                null_mut(),
+            );
+        }
+    }
+}
+
+unsafe fn process_pending_messages(
+    state: &mut State,
+    keyboard_controller: &mut GameControllerInput,
+) {
     let mut message = zeroed();
     while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
         match message.message {
@@ -555,6 +670,17 @@ unsafe fn process_pending_messages(keyboard_controller: &mut GameControllerInput
                         VK_P => {
                             if is_down {
                                 GLOBAL_PAUSE = !GLOBAL_PAUSE;
+                            }
+                        }
+                        #[cfg(debug_assertions)]
+                        VK_L => {
+                            if is_down {
+                                if state.input_recording_index == 0 {
+                                    begin_recording_input(state, 1);
+                                } else {
+                                    end_recording_input(state);
+                                    begin_input_playback(state, 1);
+                                }
                             }
                         }
                         _ => {}
@@ -775,7 +901,7 @@ pub fn main() {
         let sleep_is_granular = timeBeginPeriod(desired_scheduler_ms) == TIMERR_NOERROR;
 
         let window_class = WNDCLASSW {
-            style: CS_HREDRAW | CS_VREDRAW | CS_OWNDC,
+            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(main_window_callback),
             hInstance: GetModuleHandleW(null_mut()),
             lpszClassName: win32_string(WINDOW_CLASS_NAME).as_ptr(),
@@ -795,7 +921,7 @@ pub fn main() {
         let target_seconds_per_frame = 1.0 / game_update_hz;
         if RegisterClassW(&window_class) > 0 {
             let window = CreateWindowExW(
-                0,
+                WS_EX_TOPMOST | WS_EX_LAYERED,
                 window_class.lpszClassName,
                 win32_string(WINDOW_NAME).as_ptr(),
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -810,8 +936,6 @@ pub fn main() {
             );
 
             if !window.is_null() {
-                let device_context = GetDC(window);
-
                 // TODO: Make this like sixty seconds?
                 let samples_per_second = 48_000;
                 let bytes_per_sample = (size_of::<i16>() * 2) as u32;
@@ -836,6 +960,7 @@ pub fn main() {
                 clear_sound_buffer(&sound_output);
                 (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING);
 
+                let mut win32_state: State = zeroed();
                 GLOBAL_RUNNING = true;
 
                 if false {
@@ -868,14 +993,15 @@ pub fn main() {
                 game_memory.permanent_storage_size = megabytes(64);
                 game_memory.transient_storage_size = gigabytes(1);
 
-                let total_size =
+                win32_state.total_size =
                     game_memory.permanent_storage_size + game_memory.transient_storage_size;
-                game_memory.permanent_storage = VirtualAlloc(
+                win32_state.game_memory_block = VirtualAlloc(
                     base_address,
-                    total_size,
+                    win32_state.total_size as usize,
                     MEM_RESERVE | MEM_COMMIT,
                     PAGE_READWRITE,
                 ) as *mut u8;
+                game_memory.permanent_storage = win32_state.game_memory_block;
                 game_memory.transient_storage = game_memory
                     .permanent_storage
                     .wrapping_add(game_memory.permanent_storage_size);
@@ -947,7 +1073,10 @@ pub fn main() {
                         (*new_keyboard_controller).terminator.ended_down =
                             (*old_keyboard_controller).terminator.ended_down;
 
-                        process_pending_messages(new_keyboard_controller.as_mut().unwrap());
+                        process_pending_messages(
+                            &mut win32_state,
+                            new_keyboard_controller.as_mut().unwrap(),
+                        );
 
                         if !GLOBAL_PAUSE {
                             // TODO: Need to not poll disconnected controllers to avoid
@@ -1116,6 +1245,14 @@ pub fn main() {
                                 pitch: GLOBAL_BACK_BUFFER.pitch,
                                 bytes_per_pixel: GLOBAL_BACK_BUFFER.bytes_per_pixel,
                             };
+
+                            if win32_state.input_recording_index != 0 {
+                                record_input(&mut win32_state, &mut new_input);
+                            }
+
+                            if win32_state.input_playing_index != 0 {
+                                play_back_input(&mut win32_state, &mut new_input);
+                            }
                             (game.update_and_render)(&mut game_memory, &mut new_input, &mut buffer);
 
                             let audio_wall_clock = get_wall_clock();
@@ -1299,12 +1436,14 @@ pub fn main() {
                                     &sound_output,
                                 )
                             }
+                            let device_context = GetDC(window);
                             display_buffer_in_window(
                                 &GLOBAL_BACK_BUFFER,
                                 device_context,
                                 dimension.width,
                                 dimension.height,
                             );
+                            ReleaseDC(window, device_context);
 
                             flip_wall_clock = get_wall_clock();
 

@@ -16,6 +16,7 @@ env_logger = "0.7.1"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3.8", features = [
     "dsound",
+    "handleapi",
     "impl-default",
     "libloaderapi",
     "memoryapi",

@@ -13,6 +13,9 @@ struct State {
     green_offset: i32,
     blue_offset: i32,
     t_sine: f32,
+    player_x: i32,
+    player_y: i32,
+    t_jump: f32,
 }
 
 /// This ensures that GameUpdateAndRender has a signature that will match what
@@ -37,6 +40,9 @@ pub unsafe extern "C" fn update_and_render(
         (*game_state).tone_hz = 512;
         (*game_state).t_sine = 0.0;
 
+        (*game_state).player_x = 100;
+        (*game_state).player_y = 100;
+
         (*memory).is_initialized = true;
     }
 
@@ -58,9 +64,16 @@ pub unsafe extern "C" fn update_and_render(
             }
         }
 
-        if (*controller).action_down.ended_down {
-            (*game_state).green_offset += 1;
+        (*game_state).player_x += (4.0 * (*controller).stick_average_x) as i32;
+        (*game_state).player_y += (4.0 * (*controller).stick_average_y) as i32;
+        if (*game_state).t_jump > 0.0 {
+            (*game_state).player_y += (5.0 * (0.5 * PI * (*game_state).t_jump).sin()) as i32;
         }
+
+        if (*controller).action_down.ended_down {
+            (*game_state).t_jump = 4.0;
+        }
+        (*game_state).t_jump -= 0.033;
     }
 
     render_weird_gradient(
@@ -68,6 +81,7 @@ pub unsafe extern "C" fn update_and_render(
         (*game_state).blue_offset,
         (*game_state).green_offset,
     );
+    render_player(&(*buffer), (*game_state).player_x, (*game_state).player_y);
 }
 
 /// This ensures that GameGetSoundSamples has a signature that will match what
@@ -100,8 +114,9 @@ unsafe fn output_sound(
 
     let mut sample_out = (*sound_buffer).samples;
     for _ in 0..(*sound_buffer).sample_count {
-        let sine_value = game_state.t_sine.sin();
-        let sample_value = (sine_value * tone_volume) as i16;
+        // let sine_value = game_state.t_sine.sin();
+        // let sample_value = (sine_value * tone_volume) as i16;
+        let sample_value = 0;
 
         *sample_out = sample_value;
         sample_out = sample_out.offset(1);
@@ -127,6 +142,27 @@ unsafe fn render_weird_gradient(buffer: &GameOffscreenBuffer, blue_offset: i32, 
             *red = 0;
             *green = (y + green_offset) as u8;
             *blue = (x + blue_offset) as u8;
+        }
+    }
+}
+
+unsafe fn render_player(buffer: &GameOffscreenBuffer, player_x: i32, player_y: i32) {
+    let end_of_buffer = (buffer.memory as *mut u8).offset((buffer.pitch * buffer.height) as isize);
+
+    let color: u32 = 0xFF_FF_FF_FF;
+    let top = player_y;
+    let bottom = player_y + 10;
+    for x in player_x..player_x + 10 {
+        let mut pixel = (buffer.memory as *mut u8)
+            .offset((x * buffer.bytes_per_pixel) as isize)
+            .offset((top * buffer.pitch) as isize);
+
+        for _y in top..bottom {
+            if pixel >= buffer.memory as *mut u8 && (pixel.offset(4)) <= end_of_buffer {
+                *(pixel as *mut u32) = color;
+            }
+
+            pixel = pixel.offset(buffer.pitch as isize);
         }
     }
 }

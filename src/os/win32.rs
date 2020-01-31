@@ -6,8 +6,9 @@ use winapi::{
     ctypes::c_void,
     shared::{minwindef::LRESULT, minwindef::*, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
     um::{
-        dsound::*, libloaderapi::*, memoryapi::*, mmsystem::*, profileapi::*, synchapi::*,
-        timeapi::*, winbase::*, wingdi::*, winnt::*, winuser::*, xinput::*,
+        dsound::*, fileapi::*, libloaderapi::*, memoryapi::*, minwinbase::*, mmsystem::*,
+        profileapi::*, synchapi::*, timeapi::*, winbase::*, wingdi::*, winnt::*, winuser::*,
+        xinput::*,
     },
 };
 
@@ -129,9 +130,24 @@ unsafe fn build_exe_path_file_name(state: &State, file_name: &str, dest: &mut [u
 
 struct GameCode {
     game_code_dll: HMODULE,
+    dll_last_write_time: FILETIME,
     update_and_render: GameUpdateAndRender,
     get_sound_samples: GameGetSoundSamples,
     is_valid: bool,
+}
+
+unsafe fn get_last_write_time(filename: &[u16; MAX_PATH]) -> FILETIME {
+    let mut last_write_time: FILETIME = zeroed();
+    let mut data: WIN32_FILE_ATTRIBUTE_DATA = zeroed();
+    if GetFileAttributesExW(
+        filename.as_ptr(),
+        GetFileExInfoStandard,
+        &mut data as *mut WIN32_FILE_ATTRIBUTE_DATA as *mut c_void,
+    ) != 0
+    {
+        last_write_time = data.ftLastWriteTime;
+    }
+    last_write_time
 }
 
 unsafe fn load_game_code(
@@ -737,7 +753,7 @@ unsafe fn debug_sync_display(
     }
 }
 
-// TODO: refactor me
+// TODO: refactor me and remove this allow
 #[allow(clippy::cognitive_complexity)]
 pub fn main() {
     unsafe {
@@ -885,18 +901,17 @@ pub fn main() {
                         &source_game_code_dll_full_path,
                         &temp_game_code_dll_full_path,
                     );
-                    let mut load_counter = 0;
 
                     while GLOBAL_RUNNING {
-                        if load_counter > 120 {
+                        let new_dll_write_time =
+                            get_last_write_time(&source_game_code_dll_full_path);
+                        if CompareFileTime(&new_dll_write_time, &game.dll_last_write_time) != 0 {
                             unload_game_code(&mut game);
                             game = load_game_code(
                                 &source_game_code_dll_full_path,
                                 &temp_game_code_dll_full_path,
                             );
-                            load_counter = 0;
                         }
-                        load_counter += 1;
 
                         let old_keyboard_controller = get_controller(&mut old_input, 0);
                         let new_keyboard_controller = get_controller(&mut new_input, 0);

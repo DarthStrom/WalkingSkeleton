@@ -322,12 +322,15 @@ unsafe fn display_buffer_in_window(
     window_width: i32,
     window_height: i32,
 ) {
+    // For prototyping purposes, we're going to always blit
+    // 1-to-1 pixels to make sure we don't introduce artifacts with
+    // stretching while we are learning to code the renderer
     StretchDIBits(
         device_context,
         0,
         0,
-        window_width,
-        window_height,
+        buffer.width,
+        buffer.height,
         0,
         0,
         buffer.width,
@@ -350,11 +353,11 @@ unsafe extern "system" fn main_window_callback(
 
     match message {
         WM_ACTIVATEAPP => {
-            if w_param > 0 {
-                SetLayeredWindowAttributes(window, RGB(0, 0, 0), 255, LWA_ALPHA);
-            } else {
-                SetLayeredWindowAttributes(window, RGB(0, 0, 0), 64, LWA_ALPHA);
-            }
+            // if w_param > 0 {
+            //     SetLayeredWindowAttributes(window, RGB(0, 0, 0), 255, LWA_ALPHA);
+            // } else {
+            //     SetLayeredWindowAttributes(window, RGB(0, 0, 0), 64, LWA_ALPHA);
+            // }
         }
         WM_CLOSE | WM_DESTROY => GLOBAL_RUNNING = false,
         WM_KEYUP | WM_KEYDOWN => panic!("Keyboard input came in through a non-dispatch message!"),
@@ -493,12 +496,19 @@ fn process_xinput_stick_value(value: SHORT, dead_zone_threshold: SHORT) -> f32 {
     result
 }
 
+unsafe fn get_input_file_location(state: &State, slot_index: usize, dest: &mut [u16; MAX_PATH]) {
+    let file_name = format!("loop_edit_{}.rec", slot_index);
+    build_exe_path_file_name(state, &file_name, dest);
+}
+
 unsafe fn begin_recording_input(state: &mut State, input_recording_index: usize) {
-    state.input_recording_index = input_recording_index;
-    // TODO: these files must go in a temporary/build directory
     // TODO: lazily write the giant memory block and use a memory copy instead?
 
-    let file_name = win32_string("foo.rec");
+    state.input_recording_index = input_recording_index;
+
+    let mut file_name = zeroed();
+    get_input_file_location(state, input_recording_index, &mut file_name);
+
     state.recording_handle = CreateFileW(
         file_name.as_ptr(),
         GENERIC_WRITE,
@@ -528,7 +538,8 @@ unsafe fn end_recording_input(state: &mut State) {
 unsafe fn begin_input_playback(state: &mut State, input_playing_index: usize) {
     state.input_playing_index = input_playing_index;
 
-    let file_name = win32_string("foo.rec");
+    let mut file_name = zeroed();
+    get_input_file_location(state, input_playing_index, &mut file_name);
     state.playback_handle = CreateFileW(
         file_name.as_ptr(),
         GENERIC_READ,
@@ -575,20 +586,19 @@ unsafe fn play_back_input(state: &mut State, new_input: *mut GameInput) {
         &mut bytes_read,
         null_mut(),
     ) != 0
+        && bytes_read == 0
     {
-        if bytes_read == 0 {
-            // We've hit the end of the stream, go back to the beginning
-            let playing_index = state.input_playing_index;
-            end_input_playback(state);
-            begin_input_playback(state, playing_index);
-            ReadFile(
-                state.playback_handle,
-                new_input as *mut c_void,
-                size_of::<GameInput>() as u32,
-                &mut bytes_read,
-                null_mut(),
-            );
-        }
+        // We've hit the end of the stream, go back to the beginning
+        let playing_index = state.input_playing_index;
+        end_input_playback(state);
+        begin_input_playback(state, playing_index);
+        ReadFile(
+            state.playback_handle,
+            new_input as *mut c_void,
+            size_of::<GameInput>() as u32,
+            &mut bytes_read,
+            null_mut(),
+        );
     }
 }
 
@@ -921,7 +931,7 @@ pub fn main() {
         let target_seconds_per_frame = 1.0 / game_update_hz;
         if RegisterClassW(&window_class) > 0 {
             let window = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_LAYERED,
+                0, // WS_EX_TOPMOST | WS_EX_LAYERED,
                 window_class.lpszClassName,
                 win32_string(WINDOW_NAME).as_ptr(),
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
@@ -993,6 +1003,9 @@ pub fn main() {
                 game_memory.permanent_storage_size = megabytes(64);
                 game_memory.transient_storage_size = gigabytes(1);
 
+                // TODO: Handle various memory footprints (using system metrics)
+                // TODO: Use MEM_LARGE_PAGES and call adjust token
+                // privileges when not on Windows XP?
                 win32_state.total_size =
                     game_memory.permanent_storage_size + game_memory.transient_storage_size;
                 win32_state.game_memory_block = VirtualAlloc(
@@ -1099,6 +1112,7 @@ pub fn main() {
                                     == ERROR_SUCCESS
                                 {
                                     (*new_controller).is_connected = true;
+                                    (*new_controller).is_analog = (*old_controller).is_analog;
 
                                     // controller is plugged in
                                     let pad = controller_state.Gamepad;

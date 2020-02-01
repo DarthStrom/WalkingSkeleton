@@ -114,9 +114,9 @@ unsafe fn output_sound(
 
     let mut sample_out = (*sound_buffer).samples;
     for _ in 0..(*sound_buffer).sample_count {
-        // let sine_value = game_state.t_sine.sin();
-        // let sample_value = (sine_value * tone_volume) as i16;
-        let sample_value = 0;
+        let sine_value = game_state.t_sine.sin();
+        let sample_value = (sine_value * tone_volume) as i16;
+        // let sample_value = 0;
 
         *sample_out = sample_value;
         sample_out = sample_out.offset(1);
@@ -157,6 +157,8 @@ unsafe fn render_player(buffer: &GameOffscreenBuffer, player_x: i32, player_y: i
             .offset((x * buffer.bytes_per_pixel) as isize)
             .offset((top * buffer.pitch) as isize);
 
+        // TODO: fix this
+        #[allow(clippy::cast_ptr_alignment)]
         for _y in top..bottom {
             if pixel >= buffer.memory as *mut u8 && (pixel.offset(4)) <= end_of_buffer {
                 *(pixel as *mut u32) = color;

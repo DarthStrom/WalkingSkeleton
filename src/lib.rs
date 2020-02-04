@@ -82,6 +82,14 @@ pub unsafe extern "C" fn update_and_render(
         (*game_state).green_offset,
     );
     render_player(&(*buffer), (*game_state).player_x, (*game_state).player_y);
+
+    render_player(&(*buffer), (*input).mouse_x, (*input).mouse_y);
+
+    for button_index in 0..(*input).mouse_buttons.len() {
+        if (*input).mouse_buttons[button_index].ended_down {
+            render_player(&(*buffer), 10 + 20 * button_index as i32, 10);
+        }
+    }
 }
 
 /// This ensures that GameGetSoundSamples has a signature that will match what

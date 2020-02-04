@@ -4,11 +4,11 @@ use crate::common::*;
 use std::{ffi::*, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
     ctypes::c_void,
-    shared::{minwindef::LRESULT, minwindef::*, mmreg::*, windef::*, winerror::ERROR_SUCCESS},
+    shared::{minwindef::LRESULT, minwindef::*, mmreg::*, windef::*, winerror::*},
     um::{
-        dsound::*, fileapi::*, handleapi::CloseHandle, libloaderapi::*, memoryapi::*,
-        minwinbase::*, mmsystem::*, profileapi::*, synchapi::*, timeapi::*, winbase::*, wingdi::*,
-        winnt::*, winuser::*, xinput::*,
+        dsound::*, errhandlingapi::GetLastError, fileapi::*, handleapi::*, libloaderapi::*,
+        memoryapi::*, minwinbase::*, mmsystem::*, profileapi::*, synchapi::*, timeapi::*,
+        winbase::*, wingdi::*, winnt::*, winuser::*, xinput::*,
     },
 };
 
@@ -31,11 +31,6 @@ struct OffscreenBuffer {
     height: i32,
     pitch: i32,
     bytes_per_pixel: i32,
-}
-
-struct WindowDimension {
-    width: i32,
-    height: i32,
 }
 
 struct SoundOutput {
@@ -132,9 +127,17 @@ struct GameCode {
     is_valid: bool,
 }
 
+struct ReplayBuffer {
+    file_handle: HANDLE,
+    memory_map: HANDLE,
+    file_name: [u16; MAX_PATH],
+    memory_block: *mut u8,
+}
+
 struct State {
     total_size: usize,
     game_memory_block: *mut u8,
+    replay_buffers: [ReplayBuffer; 4],
     recording_handle: HANDLE,
     input_recording_index: usize,
     playback_handle: HANDLE,
@@ -274,17 +277,6 @@ unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: 
     }
 }
 
-fn get_window_dimension(window: HWND) -> WindowDimension {
-    let mut client_rect = RECT::default();
-    unsafe {
-        GetClientRect(window, &mut client_rect);
-    }
-    WindowDimension {
-        width: client_rect.right - client_rect.left,
-        height: client_rect.bottom - client_rect.top,
-    }
-}
-
 unsafe fn resize_dib_section(buffer: &mut OffscreenBuffer, width: i32, height: i32) {
     if !buffer.memory.is_null() {
         VirtualFree(buffer.memory, 0, MEM_RELEASE);
@@ -316,12 +308,7 @@ unsafe fn resize_dib_section(buffer: &mut OffscreenBuffer, width: i32, height: i
     buffer.pitch = buffer.width * buffer.bytes_per_pixel;
 }
 
-unsafe fn display_buffer_in_window(
-    buffer: &OffscreenBuffer,
-    device_context: HDC,
-    window_width: i32,
-    window_height: i32,
-) {
+unsafe fn display_buffer_in_window(buffer: &OffscreenBuffer, device_context: HDC) {
     // For prototyping purposes, we're going to always blit
     // 1-to-1 pixels to make sure we don't introduce artifacts with
     // stretching while we are learning to code the renderer
@@ -349,7 +336,6 @@ unsafe extern "system" fn main_window_callback(
     l_param: isize,
 ) -> LRESULT {
     let mut result = 0;
-    let dimension = get_window_dimension(window);
 
     match message {
         WM_ACTIVATEAPP => {
@@ -364,12 +350,7 @@ unsafe extern "system" fn main_window_callback(
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
             let device_context = BeginPaint(window, &mut paint);
-            display_buffer_in_window(
-                &GLOBAL_BACK_BUFFER,
-                device_context,
-                dimension.width,
-                dimension.height,
-            );
+            display_buffer_in_window(&GLOBAL_BACK_BUFFER, device_context);
             EndPaint(window, &paint);
         }
         WM_SIZE => {}
@@ -467,7 +448,6 @@ fn process_keyboard_message(new_state: &mut GameButtonState, is_down: bool) {
         new_state.ended_down = is_down;
         new_state.half_transition_count += 1;
     }
-    debug_assert!(new_state.ended_down == is_down);
 }
 
 fn process_xinput_digital_button(
@@ -496,38 +476,49 @@ fn process_xinput_stick_value(value: SHORT, dead_zone_threshold: SHORT) -> f32 {
     result
 }
 
-unsafe fn get_input_file_location(state: &State, slot_index: usize, dest: &mut [u16; MAX_PATH]) {
-    let file_name = format!("loop_edit_{}.rec", slot_index);
+unsafe fn get_input_file_location(
+    state: &State,
+    input_stream: bool,
+    slot_index: usize,
+    dest: &mut [u16; MAX_PATH],
+) {
+    let file_name = format!(
+        "loop_edit_{}_{}.rec",
+        slot_index,
+        if input_stream { "input" } else { "state" }
+    );
     build_exe_path_file_name(state, &file_name, dest);
 }
 
+unsafe fn get_replay_buffer(state: &mut State, index: usize) -> *mut ReplayBuffer {
+    debug_assert!(index < state.replay_buffers.len());
+    &mut state.replay_buffers[index]
+}
+
 unsafe fn begin_recording_input(state: &mut State, input_recording_index: usize) {
-    // TODO: lazily write the giant memory block and use a memory copy instead?
+    let replay_buffer = get_replay_buffer(state, input_recording_index);
+    if !(*replay_buffer).memory_block.is_null() {
+        state.input_recording_index = input_recording_index;
 
-    state.input_recording_index = input_recording_index;
-
-    let mut file_name = zeroed();
-    get_input_file_location(state, input_recording_index, &mut file_name);
-
-    state.recording_handle = CreateFileW(
-        file_name.as_ptr(),
-        GENERIC_WRITE,
-        0,
-        null_mut(),
-        CREATE_ALWAYS,
-        0,
-        null_mut(),
-    );
-
-    let bytes_to_write = state.total_size;
-    let mut bytes_written = zeroed();
-    WriteFile(
-        state.recording_handle,
-        state.game_memory_block as *mut c_void,
-        bytes_to_write as u32,
-        &mut bytes_written,
-        null_mut(),
-    );
+        let mut file_name = zeroed();
+        get_input_file_location(state, true, input_recording_index, &mut file_name);
+        state.recording_handle = CreateFileW(
+            file_name.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            null_mut(),
+            CREATE_ALWAYS,
+            0,
+            null_mut(),
+        );
+        RtlCopyMemory(
+            (*replay_buffer).memory_block as *mut c_void,
+            state.game_memory_block as *mut c_void,
+            state.total_size as usize,
+        );
+    } else {
+        warn!("Replay buffer memory block was null when trying to begin recording.");
+    }
 }
 
 unsafe fn end_recording_input(state: &mut State) {
@@ -536,29 +527,29 @@ unsafe fn end_recording_input(state: &mut State) {
 }
 
 unsafe fn begin_input_playback(state: &mut State, input_playing_index: usize) {
-    state.input_playing_index = input_playing_index;
+    let replay_buffer = get_replay_buffer(state, input_playing_index);
+    if !(*replay_buffer).memory_block.is_null() {
+        state.input_playing_index = input_playing_index;
 
-    let mut file_name = zeroed();
-    get_input_file_location(state, input_playing_index, &mut file_name);
-    state.playback_handle = CreateFileW(
-        file_name.as_ptr(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        null_mut(),
-        OPEN_EXISTING,
-        0,
-        null_mut(),
-    );
-
-    let bytes_to_read = state.total_size;
-    let mut bytes_read = zeroed();
-    ReadFile(
-        state.playback_handle,
-        state.game_memory_block as *mut c_void,
-        bytes_to_read as u32,
-        &mut bytes_read,
-        null_mut(),
-    );
+        let mut file_name = zeroed();
+        get_input_file_location(state, true, input_playing_index, &mut file_name);
+        state.playback_handle = CreateFileW(
+            file_name.as_ptr(),
+            GENERIC_READ,
+            0,
+            null_mut(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        );
+        RtlCopyMemory(
+            state.game_memory_block as *mut c_void,
+            (*replay_buffer).memory_block as *mut c_void,
+            state.total_size as usize,
+        );
+    } else {
+        warn!("Replay buffer memory block was null when trying to begin playback.");
+    }
 }
 
 unsafe fn end_input_playback(state: &mut State) {
@@ -685,11 +676,18 @@ unsafe fn process_pending_messages(
                         #[cfg(debug_assertions)]
                         VK_L => {
                             if is_down {
-                                if state.input_recording_index == 0 {
-                                    begin_recording_input(state, 1);
+                                if state.input_playing_index == 0 {
+                                    if state.input_recording_index == 0 {
+                                        debug!("Not recording, starting to record.");
+                                        begin_recording_input(state, 1);
+                                    } else {
+                                        debug!("Recording, starting playback.");
+                                        end_recording_input(state);
+                                        begin_input_playback(state, 1);
+                                    }
                                 } else {
-                                    end_recording_input(state);
-                                    begin_input_playback(state, 1);
+                                    debug!("Playing, canceling cycle.");
+                                    end_input_playback(state);
                                 }
                             }
                         }
@@ -717,7 +715,6 @@ fn get_seconds_elapsed(start: LARGE_INTEGER, end: LARGE_INTEGER) -> f32 {
     unsafe { (end.QuadPart() - start.QuadPart()) as f32 / GLOBAL_PERF_COUNT_FREQUENCY as f32 }
 }
 
-#[cfg(debug_assertions)]
 unsafe fn debug_draw_vertical(
     back_buffer: &OffscreenBuffer,
     x: i32,
@@ -746,7 +743,6 @@ unsafe fn debug_draw_vertical(
     }
 }
 
-#[cfg(debug_assertions)]
 fn debug_draw_sound_buffer_marker(
     back_buffer: &OffscreenBuffer,
     c: f32,
@@ -763,7 +759,6 @@ fn debug_draw_sound_buffer_marker(
     }
 }
 
-#[cfg(debug_assertions)]
 unsafe fn debug_sync_display(
     back_buffer: &OffscreenBuffer,
     markers: &mut [DebugTimeMarker],
@@ -893,17 +888,25 @@ unsafe fn debug_sync_display(
 #[allow(clippy::cognitive_complexity)]
 pub fn main() {
     unsafe {
-        let mut state = zeroed();
+        let mut win32_state = zeroed();
 
         let mut performance_count_frequency_result = zeroed();
         QueryPerformanceFrequency(&mut performance_count_frequency_result);
         GLOBAL_PERF_COUNT_FREQUENCY = *performance_count_frequency_result.QuadPart();
 
-        get_exe_file_name(&mut state);
+        get_exe_file_name(&mut win32_state);
         let mut source_game_code_dll_full_path: [u16; MAX_PATH] = [0; MAX_PATH];
-        build_exe_path_file_name(&state, "game.dll", &mut source_game_code_dll_full_path);
+        build_exe_path_file_name(
+            &win32_state,
+            "game.dll",
+            &mut source_game_code_dll_full_path,
+        );
         let mut temp_game_code_dll_full_path: [u16; MAX_PATH] = [0; MAX_PATH];
-        build_exe_path_file_name(&state, "game_temp.dll", &mut temp_game_code_dll_full_path);
+        build_exe_path_file_name(
+            &win32_state,
+            "game_temp.dll",
+            &mut temp_game_code_dll_full_path,
+        );
 
         // Set the Windows scheduler granularity to 1ms
         // so that our Sleep() can be more granular
@@ -925,10 +928,6 @@ pub fn main() {
 
         resize_dib_section(&mut GLOBAL_BACK_BUFFER, 1280, 720);
 
-        // TODO: How do we reliably query this on Windows?
-        let monitor_refresh_hz = 60;
-        let game_update_hz = monitor_refresh_hz as f32 / 2.0;
-        let target_seconds_per_frame = 1.0 / game_update_hz;
         if RegisterClassW(&window_class) > 0 {
             let window = CreateWindowExW(
                 0, // WS_EX_TOPMOST | WS_EX_LAYERED,
@@ -946,6 +945,14 @@ pub fn main() {
             );
 
             if !window.is_null() {
+                // TODO: How do we reliably query this on Windows?
+                let refresh_dc = GetDC(window);
+                let refresh_rate = GetDeviceCaps(refresh_dc, VREFRESH);
+                ReleaseDC(window, refresh_dc);
+                let monitor_refresh_hz = if refresh_rate > 1 { refresh_rate } else { 60 };
+                let game_update_hz = monitor_refresh_hz as f32 / 2.0;
+                let target_seconds_per_frame = 1.0 / game_update_hz;
+
                 // TODO: Make this like sixty seconds?
                 let samples_per_second = 48_000;
                 let bytes_per_sample = (size_of::<i16>() * 2) as u32;
@@ -954,7 +961,7 @@ pub fn main() {
                 // what the lowest reasonable value is.
                 let safety_bytes = (((samples_per_second as f32 * bytes_per_sample as f32)
                     / game_update_hz)
-                    / 1.0) as u32;
+                    / 2.0) as u32;
                 let mut sound_output = SoundOutput {
                     running_sample_index: 0,
                     bytes_per_sample,
@@ -970,7 +977,6 @@ pub fn main() {
                 clear_sound_buffer(&sound_output);
                 (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING);
 
-                let mut win32_state: State = zeroed();
                 GLOBAL_RUNNING = true;
 
                 if false {
@@ -1018,6 +1024,57 @@ pub fn main() {
                 game_memory.transient_storage = game_memory
                     .permanent_storage
                     .wrapping_add(game_memory.permanent_storage_size);
+
+                for replay_index in 1..win32_state.replay_buffers.len() {
+                    let replay_buffer =
+                        (&mut win32_state.replay_buffers[replay_index]) as *mut ReplayBuffer;
+                    get_input_file_location(
+                        &win32_state,
+                        false,
+                        replay_index,
+                        &mut (*replay_buffer).file_name,
+                    );
+                    (*replay_buffer).file_handle = CreateFileW(
+                        (*replay_buffer).file_name.as_ptr(),
+                        GENERIC_READ | GENERIC_WRITE,
+                        0,
+                        null_mut(),
+                        CREATE_ALWAYS,
+                        0,
+                        null_mut(),
+                    );
+                    if (*replay_buffer).file_handle == INVALID_HANDLE_VALUE {
+                        let last_error = GetLastError();
+                        error!("Could not create file: {:?}", last_error,);
+                    }
+                    let mut max_size: LARGE_INTEGER = zeroed();
+                    *max_size.QuadPart_mut() = win32_state.total_size as i64;
+                    (*replay_buffer).memory_map = CreateFileMappingW(
+                        (*replay_buffer).file_handle,
+                        null_mut(),
+                        PAGE_READWRITE,
+                        max_size.u().HighPart as u32,
+                        max_size.u().LowPart as u32,
+                        null_mut(),
+                    );
+                    let last_error = GetLastError();
+                    if (*replay_buffer).memory_map.is_null() {
+                        error!("Could not map file to object: {:?}", last_error);
+                    } else if last_error == ERROR_ALREADY_EXISTS {
+                        warn!("Object existed before mapping call.");
+                    }
+                    (*replay_buffer).memory_block = MapViewOfFile(
+                        (*replay_buffer).memory_map,
+                        FILE_MAP_ALL_ACCESS,
+                        0,
+                        0,
+                        win32_state.total_size as usize,
+                    ) as *mut u8;
+                    if (*replay_buffer).memory_block.is_null() {
+                        let last_error = GetLastError();
+                        error!("Replay buffer {} error: {:?}", replay_index, last_error);
+                    }
+                }
 
                 if !samples.is_null()
                     && !game_memory.permanent_storage.is_null()
@@ -1092,6 +1149,32 @@ pub fn main() {
                         );
 
                         if !GLOBAL_PAUSE {
+                            let mut mouse_p: POINT = zeroed();
+                            GetCursorPos(&mut mouse_p);
+                            ScreenToClient(window, &mut mouse_p);
+                            new_input.mouse_x = mouse_p.x;
+                            new_input.mouse_y = mouse_p.y;
+                            new_input.mouse_z = 0;
+                            process_keyboard_message(
+                                &mut new_input.mouse_buttons[0],
+                                GetKeyState(VK_LBUTTON) & (1 << 15) != 0,
+                            );
+                            process_keyboard_message(
+                                &mut new_input.mouse_buttons[1],
+                                GetKeyState(VK_MBUTTON) & (1 << 15) != 0,
+                            );
+                            process_keyboard_message(
+                                &mut new_input.mouse_buttons[2],
+                                GetKeyState(VK_RBUTTON) & (1 << 15) != 0,
+                            );
+                            process_keyboard_message(
+                                &mut new_input.mouse_buttons[3],
+                                GetKeyState(VK_XBUTTON1) & (1 << 15) != 0,
+                            );
+                            process_keyboard_message(
+                                &mut new_input.mouse_buttons[4],
+                                GetKeyState(VK_XBUTTON2) & (1 << 15) != 0,
+                            );
                             // TODO: Need to not poll disconnected controllers to avoid
                             // xinput frame rate hit on older libraries...
                             // TODO: should we poll this more frequently?
@@ -1439,24 +1522,14 @@ pub fn main() {
                                 1000.0 * get_seconds_elapsed(last_counter, end_counter);
                             last_counter = end_counter;
 
-                            let dimension = get_window_dimension(window);
-                            #[cfg(debug_assertions)]
-                            {
-                                // TODO: current is wrong on the zero'th index
-                                debug_sync_display(
-                                    &GLOBAL_BACK_BUFFER,
-                                    &mut debug_time_markers,
-                                    debug_time_marker_index as isize - 1,
-                                    &sound_output,
-                                )
-                            }
-                            let device_context = GetDC(window);
-                            display_buffer_in_window(
+                            debug_sync_display(
                                 &GLOBAL_BACK_BUFFER,
-                                device_context,
-                                dimension.width,
-                                dimension.height,
+                                &mut debug_time_markers,
+                                debug_time_marker_index as isize - 1,
+                                &sound_output,
                             );
+                            let device_context = GetDC(window);
+                            display_buffer_in_window(&GLOBAL_BACK_BUFFER, device_context);
                             ReleaseDC(window, device_context);
 
                             flip_wall_clock = get_wall_clock();

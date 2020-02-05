@@ -8,7 +8,10 @@ extern crate log;
 
 use std::f32::{self, consts::PI};
 
-struct State {}
+struct State {
+    player_x: f32,
+    player_y: f32,
+}
 
 /// This ensures that GameUpdateAndRender has a signature that will match what
 /// is specified in handmade_platform.rs
@@ -35,8 +38,45 @@ pub unsafe extern "C" fn update_and_render(
             trace!("use analog movement tuning");
         } else {
             trace!("use digital movement tuning");
+            let d_player_y = 64.0
+                * if (*controller).move_up.ended_down {
+                    -1.0
+                } else if (*controller).move_down.ended_down {
+                    1.0
+                } else {
+                    0.0
+                };
+            let d_player_x = 64.0
+                * if (*controller).move_left.ended_down {
+                    -1.0
+                } else if (*controller).move_right.ended_down {
+                    1.0
+                } else {
+                    0.0
+                };
+
+            // TODO: Diagonal will be faster! Fix once we have vectors
+            (*game_state).player_x += (*input).dt_for_frame * d_player_x;
+            (*game_state).player_y += (*input).dt_for_frame * d_player_y;
         }
     }
+
+    let tile_map: [[u32; 17]; 9] = [
+        [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+        [1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
+        [1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1],
+        [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1],
+        [1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],
+        [1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
+        [1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+    ];
+
+    let upper_left_x = -30.0;
+    let upper_left_y = 0.0;
+    let tile_width = 60.0;
+    let tile_height = 60.0;
 
     draw_rectangle(
         &(*buffer),
@@ -44,9 +84,40 @@ pub unsafe extern "C" fn update_and_render(
         0.0,
         (*buffer).width as f32,
         (*buffer).height as f32,
-        0x00_FF_00_FF,
+        1.0,
+        0.0,
+        0.1,
     );
-    draw_rectangle(&(*buffer), 10.0, 10.0, 40.0, 40.0, 0x00_00_FF_FF);
+    for (row_index, row) in tile_map.iter().enumerate() {
+        for (column_index, &tile_id) in row.iter().enumerate() {
+            let gray = if tile_id == 1 { 1.0 } else { 0.5 };
+
+            let min_x = upper_left_x + column_index as f32 * tile_width;
+            let min_y = upper_left_y + row_index as f32 * tile_height;
+            let max_x = min_x + tile_width;
+            let max_y = min_y + tile_height;
+            draw_rectangle(&(*buffer), min_x, min_y, max_x, max_y, gray, gray, gray);
+        }
+    }
+
+    let player_r = 1.0;
+    let player_g = 1.0;
+    let player_b = 0.0;
+    let player_width = 0.75 * tile_width;
+    let player_height = tile_height;
+    let player_left = (*game_state).player_x - 0.5 * player_width;
+    let player_top = (*game_state).player_y - player_height;
+    println!("player: {}", player_left);
+    draw_rectangle(
+        &(*buffer),
+        player_left,
+        player_top,
+        player_left + player_width,
+        player_top + player_height,
+        player_r,
+        player_g,
+        player_b,
+    );
 }
 
 /// This ensures that GameGetSoundSamples has a signature that will match what
@@ -102,7 +173,9 @@ fn draw_rectangle(
     real_min_y: f32,
     real_max_x: f32,
     real_max_y: f32,
-    color: u32,
+    r: f32,
+    g: f32,
+    b: f32,
 ) {
     // TODO: Floating point color
 
@@ -126,6 +199,10 @@ fn draw_rectangle(
     if max_y > buffer.height {
         max_y = buffer.height
     };
+
+    let color = ((r * 255.0).round() as u32) << 16
+        | ((g * 255.0).round() as u32) << 8
+        | (b * 255.0).round() as u32;
 
     unsafe {
         let mut row = (buffer.memory as *mut u8)

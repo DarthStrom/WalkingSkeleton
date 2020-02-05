@@ -1083,7 +1083,6 @@ pub fn main() {
                 {
                     let mut new_input: GameInput = zeroed();
                     let mut old_input: GameInput = zeroed();
-                    new_input.seconds_to_advance_over_update = target_seconds_per_frame;
 
                     let mut last_counter = get_wall_clock();
                     let mut flip_wall_clock = get_wall_clock();
@@ -1101,6 +1100,7 @@ pub fn main() {
                     );
 
                     while GLOBAL_RUNNING {
+                        new_input.dt_for_frame = target_seconds_per_frame;
                         let new_dll_write_time =
                             get_last_write_time(&source_game_code_dll_full_path);
                         if CompareFileTime(&new_dll_write_time, &game.dll_last_write_time) != 0 {

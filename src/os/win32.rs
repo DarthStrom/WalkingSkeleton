@@ -43,6 +43,11 @@ struct SoundOutput {
     // TODO: Math gets simpler if we add a "bytes per second" field?
 }
 
+struct WindowDimension {
+    width: i32,
+    height: i32,
+}
+
 struct DebugTimeMarker {
     output_play_cursor: DWORD,
     output_write_cursor: DWORD,
@@ -278,6 +283,15 @@ unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: 
     }
 }
 
+unsafe fn get_window_dimension(window: HWND) -> WindowDimension {
+    let mut client_rect = zeroed();
+    GetClientRect(window, &mut client_rect);
+    WindowDimension {
+        width: client_rect.right - client_rect.left,
+        height: client_rect.bottom - client_rect.top,
+    }
+}
+
 unsafe fn resize_dib_section(buffer: &mut OffscreenBuffer, width: i32, height: i32) {
     if !buffer.memory.is_null() {
         VirtualFree(buffer.memory, 0, MEM_RELEASE);
@@ -309,14 +323,41 @@ unsafe fn resize_dib_section(buffer: &mut OffscreenBuffer, width: i32, height: i
     buffer.pitch = buffer.width * buffer.bytes_per_pixel;
 }
 
-unsafe fn display_buffer_in_window(buffer: &OffscreenBuffer, device_context: HDC) {
+unsafe fn display_buffer_in_window(
+    buffer: &OffscreenBuffer,
+    device_context: HDC,
+    window_width: i32,
+    window_height: i32,
+) {
+    let offset_x = 10;
+    let offset_y = 10;
+
+    PatBlt(device_context, 0, 0, window_width, offset_y, BLACKNESS);
+    PatBlt(
+        device_context,
+        0,
+        offset_y + buffer.height,
+        window_width,
+        window_height,
+        BLACKNESS,
+    );
+    PatBlt(device_context, 0, 0, offset_x, window_height, BLACKNESS);
+    PatBlt(
+        device_context,
+        offset_x + buffer.width,
+        0,
+        window_width,
+        window_height,
+        BLACKNESS,
+    );
+
     // For prototyping purposes, we're going to always blit
     // 1-to-1 pixels to make sure we don't introduce artifacts with
     // stretching while we are learning to code the renderer
     StretchDIBits(
         device_context,
-        0,
-        0,
+        offset_x,
+        offset_y,
         buffer.width,
         buffer.height,
         0,
@@ -351,7 +392,13 @@ unsafe extern "system" fn main_window_callback(
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
             let device_context = BeginPaint(window, &mut paint);
-            display_buffer_in_window(&GLOBAL_BACK_BUFFER, device_context);
+            let dimension = get_window_dimension(window);
+            display_buffer_in_window(
+                &GLOBAL_BACK_BUFFER,
+                device_context,
+                dimension.width,
+                dimension.height,
+            );
             EndPaint(window, &paint);
         }
         WM_SIZE => {}
@@ -1530,8 +1577,14 @@ pub fn main() {
                             //     debug_time_marker_index as isize - 1,
                             //     &sound_output,
                             // );
+                            let dimension = get_window_dimension(window);
                             let device_context = GetDC(window);
-                            display_buffer_in_window(&GLOBAL_BACK_BUFFER, device_context);
+                            display_buffer_in_window(
+                                &GLOBAL_BACK_BUFFER,
+                                device_context,
+                                dimension.width,
+                                dimension.height,
+                            );
                             ReleaseDC(window, device_context);
 
                             flip_wall_clock = get_wall_clock();

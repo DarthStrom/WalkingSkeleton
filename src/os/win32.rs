@@ -216,6 +216,7 @@ unsafe fn unload_game_code(game_code: &mut GameCode) {
 
 // TODO: investigate XAudio2
 // waiting on https://github.com/retep998/winapi-rs/pull/602
+// or WASAPI
 unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: u32) {
     let mut direct_sound_ptr: LPDIRECTSOUND = zeroed();
     match DirectSoundCreate(null_mut(), &mut direct_sound_ptr, null_mut()) {
@@ -926,7 +927,7 @@ pub fn main() {
             lpszMenuName: null_mut(),
         };
 
-        resize_dib_section(&mut GLOBAL_BACK_BUFFER, 1280, 720);
+        resize_dib_section(&mut GLOBAL_BACK_BUFFER, 960, 540);
 
         if RegisterClassW(&window_class) > 0 {
             let window = CreateWindowExW(
@@ -1082,6 +1083,7 @@ pub fn main() {
                 {
                     let mut new_input: GameInput = zeroed();
                     let mut old_input: GameInput = zeroed();
+                    new_input.seconds_to_advance_over_update = target_seconds_per_frame;
 
                     let mut last_counter = get_wall_clock();
                     let mut flip_wall_clock = get_wall_clock();
@@ -1522,12 +1524,12 @@ pub fn main() {
                                 1000.0 * get_seconds_elapsed(last_counter, end_counter);
                             last_counter = end_counter;
 
-                            debug_sync_display(
-                                &GLOBAL_BACK_BUFFER,
-                                &mut debug_time_markers,
-                                debug_time_marker_index as isize - 1,
-                                &sound_output,
-                            );
+                            // debug_sync_display(
+                            //     &GLOBAL_BACK_BUFFER,
+                            //     &mut debug_time_markers,
+                            //     debug_time_marker_index as isize - 1,
+                            //     &sound_output,
+                            // );
                             let device_context = GetDC(window);
                             display_buffer_in_window(&GLOBAL_BACK_BUFFER, device_context);
                             ReleaseDC(window, device_context);

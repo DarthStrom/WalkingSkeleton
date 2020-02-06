@@ -539,6 +539,7 @@ unsafe fn get_input_file_location(
 }
 
 unsafe fn get_replay_buffer(state: &mut State, index: usize) -> *mut ReplayBuffer {
+    debug_assert!(index > 0);
     debug_assert!(index < state.replay_buffers.len());
     &mut state.replay_buffers[index]
 }
@@ -1057,9 +1058,15 @@ pub fn main() {
                 game_memory.permanent_storage_size = megabytes(64);
                 game_memory.transient_storage_size = gigabytes(1);
 
-                // TODO: Handle various memory footprints (using system metrics)
-                // TODO: Use MEM_LARGE_PAGES and call adjust token
-                // privileges when not on Windows XP?
+                // TODO: Handle various memory footprints (using
+                // system metrics)
+
+                // TODO: Use MEM_LARGE_PAGES and
+                // call adjust token privileges when not on Windows XP?
+
+                // TODO: TransientStorage needs to be broken up
+                // into game transient and cache transient, and only the
+                // former need be saved for state playback
                 win32_state.total_size =
                     game_memory.permanent_storage_size + game_memory.transient_storage_size;
                 win32_state.game_memory_block = VirtualAlloc(

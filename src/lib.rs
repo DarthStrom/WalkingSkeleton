@@ -8,6 +8,8 @@ extern crate log;
 
 use std::f32::{self, consts::PI};
 
+// TODO: This can become "world position" or something similar
+#[derive(Clone)]
 struct CanonicalPosition {
     /* TODO:
 
@@ -25,25 +27,13 @@ struct CanonicalPosition {
 
     tile_x: i32,
     tile_y: i32,
+    // tile_x: u32,
+    // tile_y: u32,
 
-    /* TODO:
-
-        Convert these to math-friendly, resolution independent representation of
-        world units relative to a tile.
-
-    */
+    // TODO: y should go up
+    // TODO: Should these be from the center of a tile?
     tile_rel_x: f32,
     tile_rel_y: f32,
-}
-
-#[derive(Clone)]
-struct RawPosition {
-    tile_map_x: i32,
-    tile_map_y: i32,
-
-    // Tile-map relative x and y
-    x: f32,
-    y: f32,
 }
 
 struct TileMap<'a> {
@@ -53,6 +43,7 @@ struct TileMap<'a> {
 struct World<'a> {
     tile_side_in_meters: f32,
     tile_side_in_pixels: i32,
+    meters_to_pixels: f32,
 
     count_x: i32,
     count_y: i32,
@@ -68,12 +59,7 @@ struct World<'a> {
 }
 
 struct State {
-    // TODO: Player state should be canonical position now?
-    player_tile_map_x: i32,
-    player_tile_map_y: i32,
-
-    player_x: f32,
-    player_y: f32,
+    player_p: CanonicalPosition,
 }
 
 /// This ensures that GameUpdateAndRender has a signature that will match what
@@ -136,6 +122,7 @@ const TILE_MAPS: [[TileMap; 2]; 2] = [
 ];
 
 const TILE_SIDE_IN_PIXELS: i32 = 60;
+const TILE_SIDE_IN_METERS: f32 = 1.4;
 const WORLD: World = World {
     tile_map_count_x: 2,
     tile_map_count_y: 2,
@@ -143,13 +130,14 @@ const WORLD: World = World {
     count_y: TILE_MAP_COUNT_Y,
     upper_left_x: (-TILE_SIDE_IN_PIXELS / 2) as f32,
     upper_left_y: 0.0,
-    tile_side_in_meters: 1.4,
+    tile_side_in_meters: TILE_SIDE_IN_METERS,
     tile_side_in_pixels: TILE_SIDE_IN_PIXELS,
+    meters_to_pixels: TILE_SIDE_IN_PIXELS as f32 / TILE_SIDE_IN_METERS,
     tile_maps: &TILE_MAPS,
 };
 
-const PLAYER_WIDTH: f32 = 0.75 * WORLD.tile_side_in_pixels as f32;
-const PLAYER_HEIGHT: f32 = WORLD.tile_side_in_pixels as f32;
+const PLAYER_HEIGHT: f32 = 1.4;
+const PLAYER_WIDTH: f32 = 0.75 * PLAYER_HEIGHT;
 
 #[no_mangle]
 pub unsafe extern "C" fn update_and_render(
@@ -163,16 +151,20 @@ pub unsafe extern "C" fn update_and_render(
     let game_state = (*memory).permanent_storage as *mut State;
 
     if !(*memory).is_initialized {
-        (*game_state).player_x = 175.0;
-        (*game_state).player_y = 150.0;
+        (*game_state).player_p.tile_map_x = 0;
+        (*game_state).player_p.tile_map_y = 0;
+        (*game_state).player_p.tile_x = 3;
+        (*game_state).player_p.tile_y = 3;
+        (*game_state).player_p.tile_rel_x = 5.0;
+        (*game_state).player_p.tile_rel_y = 5.0;
 
         (*memory).is_initialized = true;
     }
 
     let tile_map = get_tile_map(
         &WORLD,
-        (*game_state).player_tile_map_x,
-        (*game_state).player_tile_map_y,
+        (*game_state).player_p.tile_map_x,
+        (*game_state).player_p.tile_map_y,
     )
     .expect("could not get tile map");
 
@@ -182,7 +174,7 @@ pub unsafe extern "C" fn update_and_render(
             trace!("use analog movement tuning");
         } else {
             trace!("use digital movement tuning");
-            let d_player_y = 64.0
+            let d_player_y = 2.0
                 * if (*controller).move_up.ended_down {
                     -1.0
                 } else if (*controller).move_down.ended_down {
@@ -190,7 +182,7 @@ pub unsafe extern "C" fn update_and_render(
                 } else {
                     0.0
                 };
-            let d_player_x = 64.0
+            let d_player_x = 2.0
                 * if (*controller).move_left.ended_down {
                     -1.0
                 } else if (*controller).move_right.ended_down {
@@ -200,34 +192,25 @@ pub unsafe extern "C" fn update_and_render(
                 };
 
             // TODO: Diagonal will be faster! Fix once we have vectors
-            let new_player_x = (*game_state).player_x + (*input).dt_for_frame * d_player_x;
-            let new_player_y = (*game_state).player_y + (*input).dt_for_frame * d_player_y;
+            let mut new_player_p = (*game_state).player_p.clone();
+            new_player_p.tile_rel_x += (*input).dt_for_frame * d_player_x;
+            new_player_p.tile_rel_y += (*input).dt_for_frame * d_player_y;
+            new_player_p = recanonicalize_position(&WORLD, new_player_p);
+            // TODO: Delta function that auto-recanonicalizes
 
-            let player_pos = RawPosition {
-                tile_map_x: (*game_state).player_tile_map_x,
-                tile_map_y: (*game_state).player_tile_map_y,
-                x: new_player_x,
-                y: new_player_y,
-            };
-            let mut player_left = player_pos.clone();
-            player_left.x -= 0.5 * PLAYER_WIDTH;
-            let mut player_right = player_pos.clone();
-            player_right.x += 0.5 * PLAYER_WIDTH;
+            let mut player_left = new_player_p.clone();
+            player_left.tile_rel_x -= 0.5 * PLAYER_WIDTH;
+            player_left = recanonicalize_position(&WORLD, player_left);
 
-            if is_world_point_empty(&WORLD, &player_pos)
-                && is_world_point_empty(&WORLD, &player_left)
-                && is_world_point_empty(&WORLD, &player_right)
+            let mut player_right = new_player_p.clone();
+            player_right.tile_rel_x += 0.5 * PLAYER_WIDTH;
+            player_right = recanonicalize_position(&WORLD, player_right);
+
+            if is_world_point_empty(&WORLD, new_player_p.clone())
+                && is_world_point_empty(&WORLD, player_left)
+                && is_world_point_empty(&WORLD, player_right)
             {
-                let can_pos = get_canonical_position(&WORLD, &player_pos);
-
-                (*game_state).player_tile_map_x = can_pos.tile_map_x;
-                (*game_state).player_tile_map_y = can_pos.tile_map_y;
-                (*game_state).player_x = WORLD.upper_left_x
-                    + WORLD.tile_side_in_pixels as f32 * can_pos.tile_x as f32
-                    + can_pos.tile_rel_x;
-                (*game_state).player_y = WORLD.upper_left_y
-                    + WORLD.tile_side_in_pixels as f32 * can_pos.tile_y as f32
-                    + can_pos.tile_rel_y;
+                (*game_state).player_p = new_player_p
             }
         }
     }
@@ -245,7 +228,15 @@ pub unsafe extern "C" fn update_and_render(
     for row in 0..9 {
         for column in 0..17 {
             let tile_id = get_tile_value_unchecked(&WORLD, &tile_map, column, row);
-            let gray = if tile_id == 1 { 1.0 } else { 0.5 };
+            let gray = if tile_id == 1 {
+                1.0
+            } else if column == (*game_state).player_p.tile_x
+                && row == (*game_state).player_p.tile_y
+            {
+                0.0
+            } else {
+                0.5
+            };
 
             let min_x = WORLD.upper_left_x + column as f32 * WORLD.tile_side_in_pixels as f32;
             let min_y = WORLD.upper_left_y + row as f32 * WORLD.tile_side_in_pixels as f32;
@@ -258,14 +249,20 @@ pub unsafe extern "C" fn update_and_render(
     let player_r = 1.0;
     let player_g = 1.0;
     let player_b = 0.0;
-    let player_left = (*game_state).player_x - 0.5 * PLAYER_WIDTH;
-    let player_top = (*game_state).player_y - PLAYER_HEIGHT;
+    let player_left = WORLD.upper_left_x
+        + WORLD.tile_side_in_pixels as f32 * (*game_state).player_p.tile_x as f32
+        + WORLD.meters_to_pixels * (*game_state).player_p.tile_rel_x
+        - 0.5 * WORLD.meters_to_pixels * PLAYER_WIDTH;
+    let player_top = WORLD.upper_left_y
+        + WORLD.tile_side_in_pixels as f32 * (*game_state).player_p.tile_y as f32
+        + WORLD.meters_to_pixels * (*game_state).player_p.tile_rel_y
+        - WORLD.meters_to_pixels * PLAYER_HEIGHT;
     draw_rectangle(
         &(*buffer),
         player_left,
         player_top,
-        player_left + PLAYER_WIDTH,
-        player_top + PLAYER_HEIGHT,
+        player_left + WORLD.meters_to_pixels * PLAYER_WIDTH,
+        player_top + WORLD.meters_to_pixels * PLAYER_HEIGHT,
         player_r,
         player_g,
         player_b,
@@ -407,50 +404,60 @@ fn is_tile_map_point_empty(
     }
 }
 
-fn get_canonical_position(world: &World, pos: &RawPosition) -> CanonicalPosition {
-    let x = pos.x - world.upper_left_x;
-    let y = pos.y - world.upper_left_y;
-    let tile_x = (x / world.tile_side_in_pixels as f32).floor() as i32;
-    let tile_y = (y / world.tile_side_in_pixels as f32).floor() as i32;
-    let mut result = CanonicalPosition {
-        tile_map_x: pos.tile_map_x,
-        tile_map_y: pos.tile_map_y,
-        tile_x,
-        tile_y,
-        tile_rel_x: x - tile_x as f32 * world.tile_side_in_pixels as f32,
-        tile_rel_y: y - tile_y as f32 * world.tile_side_in_pixels as f32,
-    };
+fn recanonicalize_coord(
+    world: &World,
+    tile_count: i32,
+    tile_map: &mut i32,
+    tile: &mut i32,
+    tile_rel: &mut f32,
+) {
+    // TODO: Need to do something that doesn't use the divide/multiply method
+    // for recanonicalizing because this can end up rounding back on to the tile
+    // you just came from.
 
-    debug_assert!(result.tile_rel_x >= 0.0);
-    debug_assert!(result.tile_rel_y >= 0.0);
-    debug_assert!(result.tile_rel_x < world.tile_side_in_pixels as f32);
-    debug_assert!(result.tile_rel_y < world.tile_side_in_pixels as f32);
+    // TODO: Add bounds checking to prevent wrapping
 
-    if result.tile_x < 0 {
-        result.tile_x += world.count_x;
-        result.tile_map_x -= 1;
+    let offset = (*tile_rel / world.tile_side_in_meters).floor() as i32;
+    *tile += offset;
+    *tile_rel -= offset as f32 * world.tile_side_in_meters;
+
+    debug_assert!(*tile_rel >= 0.0);
+    // TODO: Fix floating point math so this can be <
+    debug_assert!(*tile_rel <= world.tile_side_in_meters);
+
+    if *tile < 0 {
+        *tile += tile_count;
+        *tile_map -= 1;
     }
 
-    if result.tile_y < 0 {
-        result.tile_y += world.count_y;
-        result.tile_map_y -= 1;
+    if *tile >= tile_count {
+        *tile -= tile_count;
+        *tile_map += 1;
     }
+}
 
-    if result.tile_x >= world.count_x {
-        result.tile_x -= world.count_x;
-        result.tile_map_x += 1;
-    }
+fn recanonicalize_position(world: &World, pos: CanonicalPosition) -> CanonicalPosition {
+    let mut result = pos;
 
-    if result.tile_y >= world.count_y {
-        result.tile_y -= world.count_y;
-        result.tile_map_y += 1;
-    }
+    recanonicalize_coord(
+        world,
+        world.count_x,
+        &mut result.tile_map_x,
+        &mut result.tile_x,
+        &mut result.tile_rel_x,
+    );
+    recanonicalize_coord(
+        world,
+        world.count_y,
+        &mut result.tile_map_y,
+        &mut result.tile_y,
+        &mut result.tile_rel_y,
+    );
 
     result
 }
 
-fn is_world_point_empty(world: &World, test_pos: &RawPosition) -> bool {
-    let can_pos = get_canonical_position(world, test_pos);
+fn is_world_point_empty(world: &World, can_pos: CanonicalPosition) -> bool {
     if let Some(tile_map) = get_tile_map(world, can_pos.tile_map_x, can_pos.tile_map_y) {
         is_tile_map_point_empty(world, tile_map, can_pos.tile_x, can_pos.tile_y)
     } else {

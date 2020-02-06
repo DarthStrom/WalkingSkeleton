@@ -9,14 +9,29 @@ extern crate log;
 use std::f32::{self, consts::PI};
 
 struct CanonicalPosition {
+    /* TODO:
+
+        Take the tile map x and y
+        and the tile x and y
+
+        and pack them into single 32-bit values for x and y
+        where there is some low bits for the tile index
+        and the high bits are the tile "page"
+
+        (NOTE we can eliminate the need for floor!)
+    */
     tile_map_x: i32,
     tile_map_y: i32,
 
     tile_x: i32,
     tile_y: i32,
 
-    // This is tile-relative x and y
-    // TODO: These are still in pixels...
+    /* TODO:
+
+        Convert these to math-friendly, resolution independent representation of
+        world units relative to a tile.
+
+    */
     tile_rel_x: f32,
     tile_rel_y: f32,
 }
@@ -36,13 +51,14 @@ struct TileMap<'a> {
 }
 
 struct World<'a> {
+    tile_side_in_meters: f32,
+    tile_side_in_pixels: i32,
+
     count_x: i32,
     count_y: i32,
 
     upper_left_x: f32,
     upper_left_y: f32,
-    tile_width: f32,
-    tile_height: f32,
 
     // TODO: Beginner's sparseness
     tile_map_count_x: i32,
@@ -119,20 +135,21 @@ const TILE_MAPS: [[TileMap; 2]; 2] = [
     [TileMap { tiles: &TILES_01 }, TileMap { tiles: &TILES_11 }],
 ];
 
+const TILE_SIDE_IN_PIXELS: i32 = 60;
 const WORLD: World = World {
     tile_map_count_x: 2,
     tile_map_count_y: 2,
     count_x: TILE_MAP_COUNT_X,
     count_y: TILE_MAP_COUNT_Y,
-    upper_left_x: -30.0,
+    upper_left_x: (-TILE_SIDE_IN_PIXELS / 2) as f32,
     upper_left_y: 0.0,
-    tile_width: 60.0,
-    tile_height: 60.0,
+    tile_side_in_meters: 1.4,
+    tile_side_in_pixels: TILE_SIDE_IN_PIXELS,
     tile_maps: &TILE_MAPS,
 };
 
-const PLAYER_WIDTH: f32 = 0.75 * WORLD.tile_width;
-const PLAYER_HEIGHT: f32 = WORLD.tile_height;
+const PLAYER_WIDTH: f32 = 0.75 * WORLD.tile_side_in_pixels as f32;
+const PLAYER_HEIGHT: f32 = WORLD.tile_side_in_pixels as f32;
 
 #[no_mangle]
 pub unsafe extern "C" fn update_and_render(
@@ -146,7 +163,7 @@ pub unsafe extern "C" fn update_and_render(
     let game_state = (*memory).permanent_storage as *mut State;
 
     if !(*memory).is_initialized {
-        (*game_state).player_x = 150.0;
+        (*game_state).player_x = 175.0;
         (*game_state).player_y = 150.0;
 
         (*memory).is_initialized = true;
@@ -206,10 +223,10 @@ pub unsafe extern "C" fn update_and_render(
                 (*game_state).player_tile_map_x = can_pos.tile_map_x;
                 (*game_state).player_tile_map_y = can_pos.tile_map_y;
                 (*game_state).player_x = WORLD.upper_left_x
-                    + WORLD.tile_width * can_pos.tile_x as f32
+                    + WORLD.tile_side_in_pixels as f32 * can_pos.tile_x as f32
                     + can_pos.tile_rel_x;
                 (*game_state).player_y = WORLD.upper_left_y
-                    + WORLD.tile_height * can_pos.tile_y as f32
+                    + WORLD.tile_side_in_pixels as f32 * can_pos.tile_y as f32
                     + can_pos.tile_rel_y;
             }
         }
@@ -230,10 +247,10 @@ pub unsafe extern "C" fn update_and_render(
             let tile_id = get_tile_value_unchecked(&WORLD, &tile_map, column, row);
             let gray = if tile_id == 1 { 1.0 } else { 0.5 };
 
-            let min_x = WORLD.upper_left_x + column as f32 * WORLD.tile_width;
-            let min_y = WORLD.upper_left_y + row as f32 * WORLD.tile_height;
-            let max_x = min_x + WORLD.tile_width;
-            let max_y = min_y + WORLD.tile_height;
+            let min_x = WORLD.upper_left_x + column as f32 * WORLD.tile_side_in_pixels as f32;
+            let min_y = WORLD.upper_left_y + row as f32 * WORLD.tile_side_in_pixels as f32;
+            let max_x = min_x + WORLD.tile_side_in_pixels as f32;
+            let max_y = min_y + WORLD.tile_side_in_pixels as f32;
             draw_rectangle(&(*buffer), min_x, min_y, max_x, max_y, gray, gray, gray);
         }
     }
@@ -393,21 +410,21 @@ fn is_tile_map_point_empty(
 fn get_canonical_position(world: &World, pos: &RawPosition) -> CanonicalPosition {
     let x = pos.x - world.upper_left_x;
     let y = pos.y - world.upper_left_y;
-    let tile_x = (x / world.tile_width).floor() as i32;
-    let tile_y = (y / world.tile_height).floor() as i32;
+    let tile_x = (x / world.tile_side_in_pixels as f32).floor() as i32;
+    let tile_y = (y / world.tile_side_in_pixels as f32).floor() as i32;
     let mut result = CanonicalPosition {
         tile_map_x: pos.tile_map_x,
         tile_map_y: pos.tile_map_y,
         tile_x,
         tile_y,
-        tile_rel_x: x - tile_x as f32 * world.tile_width,
-        tile_rel_y: y - tile_y as f32 * world.tile_height,
+        tile_rel_x: x - tile_x as f32 * world.tile_side_in_pixels as f32,
+        tile_rel_y: y - tile_y as f32 * world.tile_side_in_pixels as f32,
     };
 
     debug_assert!(result.tile_rel_x >= 0.0);
     debug_assert!(result.tile_rel_y >= 0.0);
-    debug_assert!(result.tile_rel_x < world.tile_width);
-    debug_assert!(result.tile_rel_y < world.tile_height);
+    debug_assert!(result.tile_rel_x < world.tile_side_in_pixels as f32);
+    debug_assert!(result.tile_rel_y < world.tile_side_in_pixels as f32);
 
     if result.tile_x < 0 {
         result.tile_x += world.count_x;

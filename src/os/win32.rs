@@ -975,6 +975,11 @@ pub fn main() {
             lpszMenuName: null_mut(),
         };
 
+        /* 1080p display mode is 1920x1080 -> Half of that is 960x540
+            1920 -> 2048 = 2048-1920 -> 128 pixels
+            1080 -> 2048 = 2048-1080 -> pixels 968
+            1024 + 128 = 1152
+        */
         resize_dib_section(&mut GLOBAL_BACK_BUFFER, 960, 540);
 
         if RegisterClassW(&window_class) > 0 {

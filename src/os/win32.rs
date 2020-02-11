@@ -657,7 +657,7 @@ unsafe fn process_pending_messages(
                 let was_down = message.lParam & (1 << 30) != 0;
                 let is_down = message.lParam & (1 << 31) == 0;
 
-                if was_down != is_down || (!was_down && !is_down) {
+                if was_down != is_down {
                     match vk_code {
                         VK_W => {
                             process_keyboard_message(&mut keyboard_controller.move_up, is_down);
@@ -1330,7 +1330,7 @@ pub fn main() {
                                         &mut (*new_controller).move_down,
                                     );
                                     process_xinput_digital_button(
-                                        if (*new_controller).stick_average_x > threshold {
+                                        if (*new_controller).stick_average_y > threshold {
                                             1
                                         } else {
                                             0

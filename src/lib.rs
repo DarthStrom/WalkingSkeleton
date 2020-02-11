@@ -1,156 +1,96 @@
 //! equivalent to handmade.h & handmade.cpp
 
 pub mod common;
+mod tile;
+
 use common::*;
+use core::mem::*;
+use tile::*;
 
 #[macro_use]
 extern crate log;
 
 use std::f32::{self, consts::PI};
 
-type Tiles = [[u32; TILE_MAP_COUNT_X]; TILE_MAP_COUNT_Y];
-
-#[derive(Clone)]
-struct TileChunkPosition {
-    tile_chunk_x: u32,
-    tile_chunk_y: u32,
-
-    rel_tile_x: u32,
-    rel_tile_y: u32,
+pub struct MemoryArena {
+    size: usize,
+    base: *mut u8,
+    used: usize,
 }
 
-#[derive(Clone)]
-struct WorldPosition {
-    /* TODO:
-
-        Take the tile map x and y
-        and the tile x and y
-
-        and pack them into single 32-bit values for x and y
-        where there is some low bits for the tile index
-        and the high bits are the tile "page"
-
-        (NOTE we can eliminate the need for floor!)
-    */
-    abs_tile_x: u32,
-    abs_tile_y: u32,
-
-    // TODO: Should these be from the center of a tile?
-    // TODO: Rename to offset x and y
-    tile_rel_x: f32,
-    tile_rel_y: f32,
-}
-
-struct TileChunk<'a> {
-    tiles: &'a Tiles,
-}
-
-struct World<'a> {
-    chunk_shift: i32,
-    chunk_mask: u32,
-    chunk_dim: u32,
-
-    tile_side_in_meters: f32,
-    tile_side_in_pixels: i32,
-    meters_to_pixels: f32,
-
-    // TODO: Beginner's sparseness
-    tile_chunk_count_x: u32,
-    tile_chunk_count_y: u32,
-
-    tile_chunks: Vec<TileChunk<'a>>,
+struct World {
+    tile_map: *mut TileMap,
 }
 
 struct State {
-    player_p: WorldPosition,
+    world_arena: MemoryArena,
+    world: *mut World,
+
+    player_p: TileMapPosition,
 }
 
 /// This ensures that GameUpdateAndRender has a signature that will match what
 /// is specified in handmade_platform.rs
 const _UPDATE_CHECK: GameUpdateAndRender = update_and_render;
 
-const TILE_MAP_COUNT_X: usize = 256;
-const TILE_MAP_COUNT_Y: usize = 256;
-const TEMP_TILES: [[u32; 34]; 18] = [
-    [
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, 1, 1, 1,
-    ],
-    [
-        1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1,
-        1, 1, 1, 1,
-    ],
-    [
-        1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1,
-        1, 1, 1, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 1,
-    ],
-    [
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, 1, 1, 1,
-    ],
-];
-
-const TILE_SIDE_IN_PIXELS: i32 = 60;
-const TILE_SIDE_IN_METERS: f32 = 1.4;
-
 const PLAYER_HEIGHT: f32 = 1.4;
 const PLAYER_WIDTH: f32 = 0.75 * PLAYER_HEIGHT;
+
+unsafe fn initialize_arena(arena: *mut MemoryArena, size: usize, base: *mut u8) {
+    (*arena).size = size;
+    (*arena).base = base;
+    (*arena).used = 0;
+}
+
+unsafe fn get_alignment_offset(arena: *mut MemoryArena, alignment: usize) -> usize {
+    let mut alignment_offset = 0;
+    let result_pointer = (*arena).base as usize + (*arena).used;
+    let alignment_mask = alignment.saturating_sub(1);
+    if (result_pointer & alignment_mask) > 0 {
+        alignment_offset = alignment - (result_pointer & alignment_mask);
+    }
+    alignment_offset
+}
+
+/// Uses PushSize for the correct amount and returns the pointer already cast to
+/// the correct type for you.
+unsafe fn push_struct<T>(arena: *mut MemoryArena) -> *mut T {
+    push_size(arena, size_of::<T>(), Some(align_of::<T>())) as *mut T
+}
+
+/// Pushes the given number of bytes into the arena. Panics on OOM.
+unsafe fn push_size(
+    arena: *mut MemoryArena,
+    size_init: usize,
+    alignment: Option<usize>,
+) -> *mut u8 {
+    let alignment = alignment.unwrap_or(4);
+    let mut size = size_init;
+
+    let alignment_offset = get_alignment_offset(arena, alignment);
+    size += alignment_offset;
+
+    debug_assert!((*arena).used + size <= (*arena).size);
+
+    let result = (*arena)
+        .base
+        .offset((*arena).used as isize + alignment_offset as isize);
+    (*arena).used += size;
+
+    debug_assert!(size >= size_init);
+
+    result
+}
+
+/// This pushes the size of the type specified times the count specified.
+///
+/// Note that you can use `PushStruct` to push a Rust array of whatever size
+/// (eg: `[u16; 20]`), which will have a similar effect, but this allows you to
+/// select a size to push at runtime, which cannot currently be done with
+/// PushStruct because Rust arrays must have a known size at compile time.
+unsafe fn push_array<T>(arena: *mut MemoryArena, count: usize) -> *mut T {
+    push_size(arena, size_of::<T>() * count, Some(align_of::<T>())) as *mut T
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn update_and_render(
@@ -160,40 +100,88 @@ pub unsafe extern "C" fn update_and_render(
 ) {
     debug_assert!(std::mem::size_of::<State>() <= (*memory).permanent_storage_size);
 
-    let tiles: &mut Tiles = &mut [[0; 256]; 256];
-    for (row_index, row) in TEMP_TILES.iter().enumerate() {
-        for (column_index, &column) in row.iter().enumerate() {
-            tiles[row_index][column_index] = column
-        }
-    }
-    let tile_chunk = TileChunk { tiles };
-    let chunk_shift = 8;
-    let world = World {
-        chunk_shift,
-        chunk_mask: (1 << chunk_shift) - 1,
-        chunk_dim: 256,
-        tile_chunk_count_x: 1,
-        tile_chunk_count_y: 1,
-        tile_chunks: vec![tile_chunk],
-        tile_side_in_meters: TILE_SIDE_IN_METERS,
-        tile_side_in_pixels: TILE_SIDE_IN_PIXELS,
-        meters_to_pixels: TILE_SIDE_IN_PIXELS as f32 / TILE_SIDE_IN_METERS,
-    };
-
-    let lower_left_x = -(world.tile_side_in_pixels as f32 / 2.0);
-    let lower_left_y = (*buffer).height as f32;
-
     #[allow(clippy::cast_ptr_alignment)]
     let game_state = (*memory).permanent_storage as *mut State;
 
     if !(*memory).is_initialized {
-        (*game_state).player_p.abs_tile_x = 3;
+        (*game_state).player_p.abs_tile_x = 1;
         (*game_state).player_p.abs_tile_y = 3;
         (*game_state).player_p.tile_rel_x = 5.0;
         (*game_state).player_p.tile_rel_y = 5.0;
 
+        initialize_arena(
+            &mut (*game_state).world_arena,
+            (*memory).permanent_storage_size as usize - size_of::<State>(),
+            ((*memory).permanent_storage as *mut u8).add(size_of::<State>()),
+        );
+
+        (*game_state).world = push_struct::<World>(&mut (*game_state).world_arena);
+        let world = (*game_state).world;
+        (*world).tile_map = push_struct::<TileMap>(&mut (*game_state).world_arena);
+
+        let tile_map = (*world).tile_map;
+
+        (*tile_map).chunk_shift = 4;
+        (*tile_map).chunk_mask = (1 << (*tile_map).chunk_shift) - 1;
+        (*tile_map).chunk_dim = 1 << (*tile_map).chunk_shift;
+
+        (*tile_map).tile_chunk_count_x = 128;
+        (*tile_map).tile_chunk_count_y = 128;
+        (*tile_map).tile_chunks = push_array::<TileChunk>(
+            &mut (*game_state).world_arena,
+            ((*tile_map).tile_chunk_count_x * (*tile_map).tile_chunk_count_y) as usize,
+        );
+
+        for y in 0..(*tile_map).tile_chunk_count_y {
+            for x in 0..(*tile_map).tile_chunk_count_x {
+                (*(*tile_map)
+                    .tile_chunks
+                    .offset((y * (*tile_map).tile_chunk_count_x + x) as isize))
+                .tiles = push_array::<u32>(
+                    &mut (*game_state).world_arena,
+                    ((*tile_map).chunk_dim * (*tile_map).chunk_dim) as usize,
+                );
+            }
+        }
+
+        (*tile_map).tile_side_in_meters = 1.4;
+        (*tile_map).tile_side_in_pixels = 60;
+        (*tile_map).meters_to_pixels =
+            (*tile_map).tile_side_in_pixels as f32 / (*tile_map).tile_side_in_meters;
+
+        let lower_left_x = -((*tile_map).tile_side_in_pixels as f32 / 2.0);
+        let lower_left_y = (*buffer).height as f32;
+
+        let tiles_per_width = 17;
+        let tiles_per_height = 9;
+        for screen_y in 0..32 {
+            for screen_x in 0..32 {
+                for tile_y in 0..tiles_per_height {
+                    for tile_x in 0..tiles_per_width {
+                        let abs_tile_x = screen_x * tiles_per_width + tile_x;
+                        let abs_tile_y = screen_y * tiles_per_height + tile_y;
+
+                        set_tile_value_abs(
+                            &(*game_state).world_arena,
+                            (*world).tile_map,
+                            abs_tile_x,
+                            abs_tile_y,
+                            if tile_x == tile_y && tile_y % 2 != 0 {
+                                1
+                            } else {
+                                0
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
         (*memory).is_initialized = true;
     }
+
+    let world = (*game_state).world;
+    let tile_map = (*world).tile_map;
 
     for controller_index in 0..(*input).controllers.len() {
         let controller = common::get_controller(input, controller_index);
@@ -201,7 +189,12 @@ pub unsafe extern "C" fn update_and_render(
             trace!("use analog movement tuning");
         } else {
             trace!("use digital movement tuning");
-            let d_player_y = 2.0
+            let player_speed = if (*controller).action_up.ended_down {
+                10.0
+            } else {
+                2.0
+            };
+            let d_player_y = player_speed
                 * if (*controller).move_up.ended_down {
                     1.0
                 } else if (*controller).move_down.ended_down {
@@ -209,7 +202,7 @@ pub unsafe extern "C" fn update_and_render(
                 } else {
                     0.0
                 };
-            let d_player_x = 2.0
+            let d_player_x = player_speed
                 * if (*controller).move_left.ended_down {
                     -1.0
                 } else if (*controller).move_right.ended_down {
@@ -222,20 +215,20 @@ pub unsafe extern "C" fn update_and_render(
             let mut new_player_p = (*game_state).player_p.clone();
             new_player_p.tile_rel_x += (*input).dt_for_frame * d_player_x;
             new_player_p.tile_rel_y += (*input).dt_for_frame * d_player_y;
-            new_player_p = recanonicalize_position(&world, new_player_p);
+            new_player_p = recanonicalize_position(&(*tile_map), new_player_p);
             // TODO: Delta function that auto-recanonicalizes
 
             let mut player_left = new_player_p.clone();
             player_left.tile_rel_x -= 0.5 * PLAYER_WIDTH;
-            player_left = recanonicalize_position(&world, player_left);
+            player_left = recanonicalize_position(&(*tile_map), player_left);
 
             let mut player_right = new_player_p.clone();
             player_right.tile_rel_x += 0.5 * PLAYER_WIDTH;
-            player_right = recanonicalize_position(&world, player_right);
+            player_right = recanonicalize_position(&(*tile_map), player_right);
 
-            if is_world_point_empty(&world, new_player_p.clone())
-                && is_world_point_empty(&world, player_left)
-                && is_world_point_empty(&world, player_right)
+            if is_tile_map_point_empty(tile_map, new_player_p.clone())
+                && is_tile_map_point_empty(tile_map, player_left)
+                && is_tile_map_point_empty(tile_map, player_right)
             {
                 (*game_state).player_p = new_player_p
             }
@@ -253,8 +246,8 @@ pub unsafe extern "C" fn update_and_render(
         0.1,
     );
 
-    let center_x = 0.5 * (*buffer).width as f32;
-    let center_y = 0.5 * (*buffer).height as f32;
+    let screen_center_x = 0.5 * (*buffer).width as f32;
+    let screen_center_y = 0.5 * (*buffer).height as f32;
 
     for r in 0..20 {
         for c in 0..40 {
@@ -262,7 +255,7 @@ pub unsafe extern "C" fn update_and_render(
             let rel_column = c - 20;
             let column = ((*game_state).player_p.abs_tile_x as i32 + rel_column) as u32;
             let row = ((*game_state).player_p.abs_tile_y as i32 + rel_row) as u32;
-            let tile_id = get_tile_value_abs(&world, column, row);
+            let tile_id = get_tile_value_abs(tile_map, column, row);
             let gray = if tile_id == 1 {
                 1.0
             } else if column == (*game_state).player_p.abs_tile_x
@@ -273,28 +266,31 @@ pub unsafe extern "C" fn update_and_render(
                 0.5
             };
 
-            let min_x = center_x + rel_column as f32 * world.tile_side_in_pixels as f32;
-            let min_y = center_y - rel_row as f32 * world.tile_side_in_pixels as f32;
-            let max_x = min_x + world.tile_side_in_pixels as f32;
-            let max_y = min_y - world.tile_side_in_pixels as f32;
-            draw_rectangle(&(*buffer), min_x, max_y, max_x, min_y, gray, gray, gray);
+            let cen_x = screen_center_x
+                - (*tile_map).meters_to_pixels * (*game_state).player_p.tile_rel_x
+                + (rel_column * (*tile_map).tile_side_in_pixels) as f32;
+            let cen_y = screen_center_y
+                + (*tile_map).meters_to_pixels * (*game_state).player_p.tile_rel_y
+                - (rel_row * (*tile_map).tile_side_in_pixels) as f32;
+            let min_x = cen_x - 0.5 * (*tile_map).tile_side_in_pixels as f32;
+            let min_y = cen_y - 0.5 * (*tile_map).tile_side_in_pixels as f32;
+            let max_x = cen_x + 0.5 * (*tile_map).tile_side_in_pixels as f32;
+            let max_y = cen_y + 0.5 * (*tile_map).tile_side_in_pixels as f32;
+            draw_rectangle(&(*buffer), min_x, min_y, max_x, max_y, gray, gray, gray);
         }
     }
 
     let player_r = 1.0;
     let player_g = 1.0;
     let player_b = 0.0;
-    let player_left = center_x + world.meters_to_pixels * (*game_state).player_p.tile_rel_x
-        - 0.5 * world.meters_to_pixels * PLAYER_WIDTH;
-    let player_top = center_y
-        - world.meters_to_pixels * (*game_state).player_p.tile_rel_y
-        - world.meters_to_pixels * PLAYER_HEIGHT;
+    let player_left = screen_center_x - 0.5 * (*tile_map).meters_to_pixels * PLAYER_WIDTH;
+    let player_top = screen_center_y - (*tile_map).meters_to_pixels * PLAYER_HEIGHT;
     draw_rectangle(
         &(*buffer),
         player_left,
         player_top,
-        player_left + world.meters_to_pixels * PLAYER_WIDTH,
-        player_top + world.meters_to_pixels * PLAYER_HEIGHT,
+        player_left + (*tile_map).meters_to_pixels * PLAYER_WIDTH,
+        player_top + (*tile_map).meters_to_pixels * PLAYER_HEIGHT,
         player_r,
         player_g,
         player_b,
@@ -399,88 +395,6 @@ fn draw_rectangle(
             row = row.offset(buffer.pitch as isize);
         }
     }
-}
-
-fn get_tile_chunk<'a>(
-    world: &'a World,
-    tile_chunk_x: i32,
-    tile_chunk_y: i32,
-) -> Option<&'a TileChunk<'a>> {
-    if tile_chunk_x >= 0
-        && tile_chunk_x < world.tile_chunk_count_x as i32
-        && tile_chunk_y >= 0
-        && tile_chunk_y < world.tile_chunk_count_y as i32
-    {
-        Some(
-            &world.tile_chunks
-                [(tile_chunk_y * world.tile_chunk_count_x as i32 + tile_chunk_x) as usize],
-        )
-    } else {
-        None
-    }
-}
-
-fn get_tile_value(world: &World, tile_chunk: &TileChunk, tile_x: u32, tile_y: u32) -> u32 {
-    debug_assert!(tile_x < world.chunk_dim);
-    debug_assert!(tile_y < world.chunk_dim);
-
-    tile_chunk.tiles[tile_y as usize][tile_x as usize]
-}
-
-fn recanonicalize_coord(world: &World, tile: &mut u32, tile_rel: &mut f32) {
-    // TODO: Need to do something that doesn't use the divide/multiply method
-    // for recanonicalizing because this can end up rounding back on to the tile
-    // you just came from.
-
-    // World is assumed to bo toroidal topology, if you
-    // step off one end you come back on the other
-    let offset = (*tile_rel / world.tile_side_in_meters).floor() as i32;
-    *tile = (*tile as i32 + offset) as u32;
-    *tile_rel -= offset as f32 * world.tile_side_in_meters;
-
-    debug_assert!(*tile_rel >= 0.0);
-    // TODO: Fix floating point math so this can be <
-    debug_assert!(*tile_rel <= world.tile_side_in_meters);
-}
-
-fn recanonicalize_position(world: &World, pos: WorldPosition) -> WorldPosition {
-    let mut result = pos;
-
-    recanonicalize_coord(world, &mut result.abs_tile_x, &mut result.tile_rel_x);
-    recanonicalize_coord(world, &mut result.abs_tile_y, &mut result.tile_rel_y);
-
-    result
-}
-
-fn get_chunk_position_for(world: &World, abs_tile_x: u32, abs_tile_y: u32) -> TileChunkPosition {
-    TileChunkPosition {
-        tile_chunk_x: abs_tile_x >> world.chunk_shift,
-        tile_chunk_y: abs_tile_y >> world.chunk_shift,
-        rel_tile_x: abs_tile_x & world.chunk_mask,
-        rel_tile_y: abs_tile_y & world.chunk_mask,
-    }
-}
-
-fn get_tile_value_abs(world: &World, abs_tile_x: u32, abs_tile_y: u32) -> u32 {
-    let chunk_pos = get_chunk_position_for(world, abs_tile_x, abs_tile_y);
-    if let Some(tile_chunk) = get_tile_chunk(
-        world,
-        chunk_pos.tile_chunk_x as i32,
-        chunk_pos.tile_chunk_y as i32,
-    ) {
-        get_tile_value(
-            world,
-            tile_chunk,
-            chunk_pos.rel_tile_x,
-            chunk_pos.rel_tile_y,
-        )
-    } else {
-        0
-    }
-}
-
-fn is_world_point_empty(world: &World, can_pos: WorldPosition) -> bool {
-    get_tile_value_abs(world, can_pos.abs_tile_x, can_pos.abs_tile_y) == 0
 }
 
 // unsafe fn render_weird_gradient(buffer: &GameOffscreenBuffer, blue_offset: i32, green_offset: i32) {

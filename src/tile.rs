@@ -9,10 +9,9 @@ pub struct TileMapPosition {
     pub abs_tile_y: u32,
     pub abs_tile_z: u32,
 
-    // TODO: Should these be from the center of a tile?
-    // TODO: Rename to offset x and y
-    pub tile_rel_x: f32,
-    pub tile_rel_y: f32,
+    // These are the offsets from the tile center
+    pub offset_x: f32,
+    pub offset_y: f32,
 }
 
 #[derive(Clone)]
@@ -44,31 +43,6 @@ pub struct TileMap {
     pub tile_chunks: *mut TileChunk,
 }
 
-pub fn recanonicalize_coord(tile_map: &TileMap, tile: &mut u32, tile_rel: &mut f32) {
-    // TODO: Need to do something that doesn't use the divide/multiply method
-    // for recanonicalizing because this can end up rounding back on to the tile
-    // you just came from.
-
-    // TileMap is assumed to bo toroidal topology, if you
-    // step off one end you come back on the other
-    let offset = (*tile_rel / tile_map.tile_side_in_meters).round() as i32;
-    *tile = (*tile as i32 + offset) as u32;
-    *tile_rel -= offset as f32 * tile_map.tile_side_in_meters;
-
-    // TODO: Fix floating point math so this can be <
-    debug_assert!(*tile_rel >= -0.5 * tile_map.tile_side_in_meters);
-    debug_assert!(*tile_rel <= 0.5 * tile_map.tile_side_in_meters);
-}
-
-pub fn recanonicalize_position(tile_map: &TileMap, pos: TileMapPosition) -> TileMapPosition {
-    let mut result = pos;
-
-    recanonicalize_coord(tile_map, &mut result.abs_tile_x, &mut result.tile_rel_x);
-    recanonicalize_coord(tile_map, &mut result.abs_tile_y, &mut result.tile_rel_y);
-
-    result
-}
-
 unsafe fn get_tile_chunk(
     tile_map: *mut TileMap,
     tile_chunk_x: u32,
@@ -89,7 +63,7 @@ unsafe fn get_tile_chunk(
     }
 }
 
-unsafe fn get_tile_value(
+unsafe fn get_tile_value_rel(
     tile_map: &TileMap,
     tile_chunk: &TileChunk,
     tile_x: u32,
@@ -107,7 +81,7 @@ unsafe fn get_tile_value(
     }
 }
 
-unsafe fn set_tile_value(
+unsafe fn set_tile_value_for_chunk(
     tile_map: &TileMap,
     tile_chunk: &TileChunk,
     tile_x: u32,
@@ -150,7 +124,7 @@ pub unsafe fn get_tile_value_abs(
         chunk_pos.tile_chunk_y,
         chunk_pos.tile_chunk_z,
     ) {
-        get_tile_value(
+        get_tile_value_rel(
             &(*tile_map),
             &(*tile_chunk),
             chunk_pos.rel_tile_x,
@@ -161,16 +135,15 @@ pub unsafe fn get_tile_value_abs(
     }
 }
 
-pub unsafe fn is_tile_map_point_empty(tile_map: *mut TileMap, can_pos: TileMapPosition) -> bool {
-    get_tile_value_abs(
-        tile_map,
-        can_pos.abs_tile_x,
-        can_pos.abs_tile_y,
-        can_pos.abs_tile_z,
-    ) == 1
+pub unsafe fn get_tile_value(tile_map: *mut TileMap, pos: &TileMapPosition) -> u32 {
+    get_tile_value_abs(tile_map, pos.abs_tile_x, pos.abs_tile_y, pos.abs_tile_z)
 }
 
-pub unsafe fn set_tile_value_abs(
+pub unsafe fn is_tile_map_point_empty(tile_map: *mut TileMap, pos: &TileMapPosition) -> bool {
+    [1, 3, 4].contains(&get_tile_value(tile_map, pos))
+}
+
+pub unsafe fn set_tile_value(
     arena: *mut MemoryArena,
     tile_map: *mut TileMap,
     abs_tile_x: u32,
@@ -195,11 +168,44 @@ pub unsafe fn set_tile_value_abs(
         }
     }
 
-    set_tile_value(
+    set_tile_value_for_chunk(
         &(*tile_map),
         &(*tile_chunk),
         chunk_pos.rel_tile_x,
         chunk_pos.rel_tile_y,
         tile_value,
     );
+}
+
+//
+// TODO: Do these really belong in more of a "positioning" or "geometry" file?
+//
+
+pub fn recanonicalize_coord(tile_map: &TileMap, tile: &mut u32, tile_rel: &mut f32) {
+    // TODO: Need to do something that doesn't use the divide/multiply method
+    // for recanonicalizing because this can end up rounding back on to the tile
+    // you just came from.
+
+    // TileMap is assumed to bo toroidal topology, if you
+    // step off one end you come back on the other
+    let offset = (*tile_rel / tile_map.tile_side_in_meters).round() as i32;
+    *tile = (*tile as i32 + offset) as u32;
+    *tile_rel -= offset as f32 * tile_map.tile_side_in_meters;
+
+    // TODO: Fix floating point math so this can be <
+    debug_assert!(*tile_rel >= -0.5 * tile_map.tile_side_in_meters);
+    debug_assert!(*tile_rel <= 0.5 * tile_map.tile_side_in_meters);
+}
+
+pub fn recanonicalize_position(tile_map: &TileMap, pos: TileMapPosition) -> TileMapPosition {
+    let mut result = pos;
+
+    recanonicalize_coord(tile_map, &mut result.abs_tile_x, &mut result.offset_x);
+    recanonicalize_coord(tile_map, &mut result.abs_tile_y, &mut result.offset_y);
+
+    result
+}
+
+pub fn are_on_same_tile(a: &TileMapPosition, b: &TileMapPosition) -> bool {
+    a.abs_tile_x == b.abs_tile_x && a.abs_tile_y == b.abs_tile_y && a.abs_tile_z == b.abs_tile_z
 }

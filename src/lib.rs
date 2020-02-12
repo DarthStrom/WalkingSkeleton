@@ -22,6 +22,7 @@ struct State {
     world: *mut World,
 
     player_p: TileMapPosition,
+    pixel_pointer: *mut u32,
 }
 
 /// This ensures that GameUpdateAndRender has a signature that will match what
@@ -49,10 +50,12 @@ pub unsafe extern "C" fn update_and_render(
     let game_state = (*memory).permanent_storage as *mut State;
 
     if !(*memory).is_initialized {
+        // let bmp = image::open("test/test_background.bmp").expect("could not load background");
+
         (*game_state).player_p.abs_tile_x = 1;
         (*game_state).player_p.abs_tile_y = 3;
-        (*game_state).player_p.tile_rel_x = 5.0;
-        (*game_state).player_p.tile_rel_y = 5.0;
+        (*game_state).player_p.offset_x = 5.0;
+        (*game_state).player_p.offset_y = 5.0;
 
         initialize_arena(
             &mut (*game_state).world_arena,
@@ -103,8 +106,10 @@ pub unsafe extern "C" fn update_and_render(
                 rng.gen_range(0, 3)
             };
 
+            let mut created_z_door = false;
             match random_choice {
                 2 => {
+                    created_z_door = true;
                     if abs_tile_z == 0 {
                         door_up = true;
                     } else {
@@ -140,7 +145,7 @@ pub unsafe extern "C" fn update_and_render(
                         1
                     };
 
-                    set_tile_value_abs(
+                    set_tile_value(
                         &mut (*game_state).world_arena,
                         (*world).tile_map,
                         abs_tile_x,
@@ -154,12 +159,9 @@ pub unsafe extern "C" fn update_and_render(
             door_left = door_right;
             door_bottom = door_top;
 
-            if door_up {
-                door_down = true;
-                door_up = false;
-            } else if door_down {
-                door_up = true;
-                door_down = false;
+            if created_z_door {
+                door_down = !door_down;
+                door_up = !door_up;
             } else {
                 door_up = false;
                 door_down = false;
@@ -223,23 +225,32 @@ pub unsafe extern "C" fn update_and_render(
 
             // TODO: Diagonal will be faster! Fix once we have vectors
             let mut new_player_p = (*game_state).player_p.clone();
-            new_player_p.tile_rel_x += (*input).dt_for_frame * d_player_x;
-            new_player_p.tile_rel_y += (*input).dt_for_frame * d_player_y;
+            new_player_p.offset_x += (*input).dt_for_frame * d_player_x;
+            new_player_p.offset_y += (*input).dt_for_frame * d_player_y;
             new_player_p = recanonicalize_position(&(*tile_map), new_player_p);
             // TODO: Delta function that auto-recanonicalizes
 
             let mut player_left = new_player_p.clone();
-            player_left.tile_rel_x -= 0.5 * PLAYER_WIDTH;
+            player_left.offset_x -= 0.5 * PLAYER_WIDTH;
             player_left = recanonicalize_position(&(*tile_map), player_left);
 
             let mut player_right = new_player_p.clone();
-            player_right.tile_rel_x += 0.5 * PLAYER_WIDTH;
+            player_right.offset_x += 0.5 * PLAYER_WIDTH;
             player_right = recanonicalize_position(&(*tile_map), player_right);
 
-            if is_tile_map_point_empty(tile_map, new_player_p.clone())
-                && is_tile_map_point_empty(tile_map, player_left)
-                && is_tile_map_point_empty(tile_map, player_right)
+            if is_tile_map_point_empty(tile_map, &new_player_p)
+                && is_tile_map_point_empty(tile_map, &player_left)
+                && is_tile_map_point_empty(tile_map, &player_right)
             {
+                if !are_on_same_tile(&(*game_state).player_p, &new_player_p) {
+                    let new_tile_value = get_tile_value(tile_map, &new_player_p);
+
+                    if new_tile_value == 3 {
+                        new_player_p.abs_tile_z += 1;
+                    } else if new_tile_value == 4 {
+                        new_player_p.abs_tile_z -= 1;
+                    }
+                }
                 (*game_state).player_p = new_player_p
             }
         }
@@ -281,9 +292,9 @@ pub unsafe extern "C" fn update_and_render(
                     0.5
                 };
 
-                let cen_x = screen_center_x - meters_to_pixels * (*game_state).player_p.tile_rel_x
+                let cen_x = screen_center_x - meters_to_pixels * (*game_state).player_p.offset_x
                     + (rel_column * tile_side_in_pixels) as f32;
-                let cen_y = screen_center_y + meters_to_pixels * (*game_state).player_p.tile_rel_y
+                let cen_y = screen_center_y + meters_to_pixels * (*game_state).player_p.offset_y
                     - (rel_row * tile_side_in_pixels) as f32;
                 let min_x = cen_x - 0.5 * tile_side_in_pixels as f32;
                 let min_y = cen_y - 0.5 * tile_side_in_pixels as f32;
@@ -309,6 +320,23 @@ pub unsafe extern "C" fn update_and_render(
         player_g,
         player_b,
     );
+
+    /* not sure what Casey will do with this...
+
+        uint32 *Source = GameState->PixelPointer;
+        uint32 *Dest = (uint32 *)Buffer->Memory;
+        for(int32 Y = 0;
+            Y < Buffer->Height;
+            ++Y)
+        {
+            for(int32 X = 0;
+                X < Buffer->Width;
+                ++X)
+            {
+                *Dest++ = *Source++;
+            }
+        }
+    */
 }
 
 /// This ensures that GameGetSoundSamples has a signature that will match what

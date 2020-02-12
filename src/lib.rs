@@ -5,6 +5,7 @@ mod tile;
 
 use common::*;
 use core::mem::*;
+use image::{DynamicImage, GenericImageView, Pixel};
 use rand::prelude::*;
 use tile::*;
 
@@ -22,7 +23,11 @@ struct State {
     world: *mut World,
 
     player_p: TileMapPosition,
-    pixel_pointer: *mut u32,
+
+    backdrop: DynamicImage,
+    hero_head: DynamicImage,
+    hero_cape: DynamicImage,
+    hero_torso: DynamicImage,
 }
 
 /// This ensures that GameUpdateAndRender has a signature that will match what
@@ -50,7 +55,14 @@ pub unsafe extern "C" fn update_and_render(
     let game_state = (*memory).permanent_storage as *mut State;
 
     if !(*memory).is_initialized {
-        // let bmp = image::open("test/test_background.bmp").expect("could not load background");
+        (*game_state).backdrop =
+            image::open("data/test/test_background.bmp").expect("could not load background");
+        (*game_state).hero_head =
+            image::open("data/test/test_hero_front_head.bmp").expect("could not load head");
+        (*game_state).hero_cape =
+            image::open("data/test/test_hero_front_cape.bmp").expect("could not load cape");
+        (*game_state).hero_torso =
+            image::open("data/test/test_hero_front_torso.bmp").expect("could not load torso");
 
         (*game_state).player_p.abs_tile_x = 1;
         (*game_state).player_p.abs_tile_y = 3;
@@ -256,16 +268,7 @@ pub unsafe extern "C" fn update_and_render(
         }
     }
 
-    draw_rectangle(
-        &(*buffer),
-        0.0,
-        0.0,
-        (*buffer).width as f32,
-        (*buffer).height as f32,
-        1.0,
-        0.0,
-        0.1,
-    );
+    draw_bitmap(&(*buffer), &(*game_state).backdrop, 0.0, 0.0);
 
     let screen_center_x = 0.5 * (*buffer).width as f32;
     let screen_center_y = 0.5 * (*buffer).height as f32;
@@ -279,7 +282,7 @@ pub unsafe extern "C" fn update_and_render(
             let tile_id =
                 get_tile_value_abs(tile_map, column, row, (*game_state).player_p.abs_tile_z);
 
-            if tile_id > 0 {
+            if tile_id > 1 {
                 let gray = if tile_id == 2 {
                     1.0
                 } else if column == (*game_state).player_p.abs_tile_x
@@ -321,22 +324,8 @@ pub unsafe extern "C" fn update_and_render(
         player_b,
     );
 
-    /* not sure what Casey will do with this...
-
-        uint32 *Source = GameState->PixelPointer;
-        uint32 *Dest = (uint32 *)Buffer->Memory;
-        for(int32 Y = 0;
-            Y < Buffer->Height;
-            ++Y)
-        {
-            for(int32 X = 0;
-                X < Buffer->Width;
-                ++X)
-            {
-                *Dest++ = *Source++;
-            }
-        }
-    */
+    // draw_bitmap(&(*buffer), &(*game_state).hero_head, player_left, player_top);
+    draw_bitmap(&(*buffer), &(*game_state).hero_head, 0.0, 0.0);
 }
 
 /// This ensures that GameGetSoundSamples has a signature that will match what
@@ -436,6 +425,48 @@ fn draw_rectangle(
             }
             row = row.offset(buffer.pitch as isize);
         }
+    }
+}
+
+unsafe fn draw_bitmap(
+    buffer: &GameOffscreenBuffer,
+    bitmap: &DynamicImage,
+    real_x: f32,
+    real_y: f32,
+) {
+    let mut min_x = real_x.round() as i32;
+    let mut min_y = real_y.round() as i32;
+    let mut max_x = real_x as i32 + bitmap.width() as i32;
+    let mut max_y = real_y as i32 + bitmap.height() as i32;
+
+    if min_x < 0 {
+        min_x = 0;
+    }
+
+    if min_y < 0 {
+        min_y = 0;
+    }
+
+    if max_x > buffer.width {
+        max_x = buffer.width;
+    }
+
+    if max_y > buffer.height {
+        max_y = buffer.height;
+    }
+
+    let mut dest_row = (buffer.memory as *mut u8)
+        .offset((min_x * buffer.bytes_per_pixel + min_y * buffer.pitch) as isize);
+    for y in min_y..max_y {
+        #[allow(clippy::cast_ptr_alignment)]
+        let mut dest = dest_row as *mut u32;
+        for x in min_x..max_x {
+            let pixel = bitmap.get_pixel(x as u32, y as u32);
+            *dest = std::mem::transmute::<[u8; 4], u32>(pixel.to_bgra().0).to_le();
+            dest = dest.add(1);
+        }
+
+        dest_row = dest_row.offset(buffer.pitch as isize);
     }
 }
 

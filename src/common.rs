@@ -1,5 +1,6 @@
 //! equivalent to handmade_platform.cpp
 
+use core::mem::*;
 use winapi::ctypes::c_void;
 
 pub fn kilobytes(bytes: usize) -> usize {
@@ -16,6 +17,62 @@ pub fn gigabytes(bytes: usize) -> usize {
 
 pub fn terabytes(bytes: usize) -> usize {
     1024 * gigabytes(bytes)
+}
+
+unsafe fn get_alignment_offset(arena: *mut MemoryArena, alignment: usize) -> usize {
+    let mut alignment_offset = 0;
+    let result_pointer = (*arena).base as usize + (*arena).used;
+    let alignment_mask = alignment.saturating_sub(1);
+    if (result_pointer & alignment_mask) > 0 {
+        alignment_offset = alignment - (result_pointer & alignment_mask);
+    }
+    alignment_offset
+}
+
+/// Uses PushSize for the correct amount and returns the pointer already cast to
+/// the correct type for you.
+pub unsafe fn push_struct<T>(arena: *mut MemoryArena) -> *mut T {
+    push_size(arena, size_of::<T>(), Some(align_of::<T>())) as *mut T
+}
+
+/// Pushes the given number of bytes into the arena. Panics on OOM.
+pub unsafe fn push_size(
+    arena: *mut MemoryArena,
+    size_init: usize,
+    alignment: Option<usize>,
+) -> *mut u8 {
+    let alignment = alignment.unwrap_or(4);
+    let mut size = size_init;
+
+    let alignment_offset = get_alignment_offset(arena, alignment);
+    size += alignment_offset;
+
+    debug_assert!((*arena).used + size <= (*arena).size);
+
+    let result = (*arena)
+        .base
+        .offset((*arena).used as isize + alignment_offset as isize);
+    (*arena).used += size;
+
+    debug_assert!(size >= size_init);
+
+    result
+}
+
+/// This pushes the size of the type specified times the count specified.
+///
+/// Note that you can use `PushStruct` to push a Rust array of whatever size
+/// (eg: `[u16; 20]`), which will have a similar effect, but this allows you to
+/// select a size to push at runtime, which cannot currently be done with
+/// PushStruct because Rust arrays must have a known size at compile time.
+pub unsafe fn push_array<T>(arena: *mut MemoryArena, count: usize) -> *mut T {
+    push_size(arena, size_of::<T>() * count, Some(align_of::<T>())) as *mut T
+}
+
+pub struct MemoryArena {
+    pub size: usize,
+    pub base: *mut u8,
+    pub used: usize,
 }
 
 pub struct GameOffscreenBuffer {

@@ -1,4 +1,4 @@
-use crate::MemoryArena;
+use crate::common::*;
 
 #[derive(Clone)]
 pub struct TileMapPosition {
@@ -7,6 +7,7 @@ pub struct TileMapPosition {
     // index in the chunk.
     pub abs_tile_x: u32,
     pub abs_tile_y: u32,
+    pub abs_tile_z: u32,
 
     // TODO: Should these be from the center of a tile?
     // TODO: Rename to offset x and y
@@ -18,12 +19,14 @@ pub struct TileMapPosition {
 pub struct TileChunkPosition {
     tile_chunk_x: u32,
     tile_chunk_y: u32,
+    tile_chunk_z: u32,
 
     rel_tile_x: u32,
     rel_tile_y: u32,
 }
 
 pub struct TileChunk {
+    // TODO: Real structure for a tile
     pub tiles: *mut u32,
 }
 
@@ -33,12 +36,10 @@ pub struct TileMap {
     pub chunk_dim: u32,
 
     pub tile_side_in_meters: f32,
-    pub tile_side_in_pixels: i32,
-    pub meters_to_pixels: f32,
 
-    // TODO: Beginner's sparseness
     pub tile_chunk_count_x: u32,
     pub tile_chunk_count_y: u32,
+    pub tile_chunk_count_z: u32,
 
     pub tile_chunks: *mut TileChunk,
 }
@@ -72,15 +73,17 @@ unsafe fn get_tile_chunk(
     tile_map: *mut TileMap,
     tile_chunk_x: u32,
     tile_chunk_y: u32,
+    tile_chunk_z: u32,
 ) -> Option<*mut TileChunk> {
     if tile_chunk_x < (*tile_map).tile_chunk_count_x
         && tile_chunk_y < (*tile_map).tile_chunk_count_y
+        && tile_chunk_z < (*tile_map).tile_chunk_count_z
     {
-        Some(
-            (*tile_map)
-                .tile_chunks
-                .offset((tile_chunk_y * (*tile_map).tile_chunk_count_x + tile_chunk_x) as isize),
-        )
+        Some((*tile_map).tile_chunks.offset(
+            (tile_chunk_z * (*tile_map).tile_chunk_count_y * (*tile_map).tile_chunk_count_x
+                + tile_chunk_y * (*tile_map).tile_chunk_count_x
+                + tile_chunk_x) as isize,
+        ))
     } else {
         None
     }
@@ -95,9 +98,13 @@ unsafe fn get_tile_value(
     debug_assert!(tile_x < tile_map.chunk_dim);
     debug_assert!(tile_y < tile_map.chunk_dim);
 
-    *tile_chunk
-        .tiles
-        .offset((tile_y * tile_map.chunk_dim + tile_x) as isize)
+    if !tile_chunk.tiles.is_null() {
+        *tile_chunk
+            .tiles
+            .offset((tile_y * tile_map.chunk_dim + tile_x) as isize)
+    } else {
+        0
+    }
 }
 
 unsafe fn set_tile_value(
@@ -119,20 +126,30 @@ fn get_chunk_position_for(
     tile_map: &TileMap,
     abs_tile_x: u32,
     abs_tile_y: u32,
+    abs_tile_z: u32,
 ) -> TileChunkPosition {
     TileChunkPosition {
         tile_chunk_x: abs_tile_x >> tile_map.chunk_shift,
         tile_chunk_y: abs_tile_y >> tile_map.chunk_shift,
+        tile_chunk_z: abs_tile_z,
         rel_tile_x: abs_tile_x & tile_map.chunk_mask,
         rel_tile_y: abs_tile_y & tile_map.chunk_mask,
     }
 }
 
-pub unsafe fn get_tile_value_abs(tile_map: *mut TileMap, abs_tile_x: u32, abs_tile_y: u32) -> u32 {
-    let chunk_pos = get_chunk_position_for(&(*tile_map), abs_tile_x, abs_tile_y);
-    if let Some(tile_chunk) =
-        get_tile_chunk(tile_map, chunk_pos.tile_chunk_x, chunk_pos.tile_chunk_y)
-    {
+pub unsafe fn get_tile_value_abs(
+    tile_map: *mut TileMap,
+    abs_tile_x: u32,
+    abs_tile_y: u32,
+    abs_tile_z: u32,
+) -> u32 {
+    let chunk_pos = get_chunk_position_for(&(*tile_map), abs_tile_x, abs_tile_y, abs_tile_z);
+    if let Some(tile_chunk) = get_tile_chunk(
+        tile_map,
+        chunk_pos.tile_chunk_x,
+        chunk_pos.tile_chunk_y,
+        chunk_pos.tile_chunk_z,
+    ) {
         get_tile_value(
             &(*tile_map),
             &(*tile_chunk),
@@ -145,21 +162,39 @@ pub unsafe fn get_tile_value_abs(tile_map: *mut TileMap, abs_tile_x: u32, abs_ti
 }
 
 pub unsafe fn is_tile_map_point_empty(tile_map: *mut TileMap, can_pos: TileMapPosition) -> bool {
-    get_tile_value_abs(tile_map, can_pos.abs_tile_x, can_pos.abs_tile_y) == 0
+    get_tile_value_abs(
+        tile_map,
+        can_pos.abs_tile_x,
+        can_pos.abs_tile_y,
+        can_pos.abs_tile_z,
+    ) == 1
 }
 
 pub unsafe fn set_tile_value_abs(
-    arena: &MemoryArena,
+    arena: *mut MemoryArena,
     tile_map: *mut TileMap,
     abs_tile_x: u32,
     abs_tile_y: u32,
+    abs_tile_z: u32,
     tile_value: u32,
 ) {
-    let chunk_pos = get_chunk_position_for(&(*tile_map), abs_tile_x, abs_tile_y);
-    let tile_chunk = get_tile_chunk(tile_map, chunk_pos.tile_chunk_x, chunk_pos.tile_chunk_y)
-        .expect("could not get tile chunk");
+    let chunk_pos = get_chunk_position_for(&(*tile_map), abs_tile_x, abs_tile_y, abs_tile_z);
+    let tile_chunk = get_tile_chunk(
+        tile_map,
+        chunk_pos.tile_chunk_x,
+        chunk_pos.tile_chunk_y,
+        chunk_pos.tile_chunk_z,
+    )
+    .expect("could not get tile chunk");
 
-    // TODO: On-demand tile chunk creation
+    if (*tile_chunk).tiles.is_null() {
+        let tile_count = ((*tile_map).chunk_dim * (*tile_map).chunk_dim) as usize;
+        (*tile_chunk).tiles = push_array::<u32>(arena, tile_count);
+        for tile_index in 0..tile_count {
+            (*(*tile_chunk).tiles.add(tile_index)) = 1;
+        }
+    }
+
     set_tile_value(
         &(*tile_map),
         &(*tile_chunk),

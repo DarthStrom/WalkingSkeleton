@@ -5,18 +5,13 @@ mod tile;
 
 use common::*;
 use core::mem::*;
+use rand::prelude::*;
 use tile::*;
 
 #[macro_use]
 extern crate log;
 
 use std::f32::{self, consts::PI};
-
-pub struct MemoryArena {
-    size: usize,
-    base: *mut u8,
-    used: usize,
-}
 
 struct World {
     tile_map: *mut TileMap,
@@ -40,56 +35,6 @@ unsafe fn initialize_arena(arena: *mut MemoryArena, size: usize, base: *mut u8) 
     (*arena).size = size;
     (*arena).base = base;
     (*arena).used = 0;
-}
-
-unsafe fn get_alignment_offset(arena: *mut MemoryArena, alignment: usize) -> usize {
-    let mut alignment_offset = 0;
-    let result_pointer = (*arena).base as usize + (*arena).used;
-    let alignment_mask = alignment.saturating_sub(1);
-    if (result_pointer & alignment_mask) > 0 {
-        alignment_offset = alignment - (result_pointer & alignment_mask);
-    }
-    alignment_offset
-}
-
-/// Uses PushSize for the correct amount and returns the pointer already cast to
-/// the correct type for you.
-unsafe fn push_struct<T>(arena: *mut MemoryArena) -> *mut T {
-    push_size(arena, size_of::<T>(), Some(align_of::<T>())) as *mut T
-}
-
-/// Pushes the given number of bytes into the arena. Panics on OOM.
-unsafe fn push_size(
-    arena: *mut MemoryArena,
-    size_init: usize,
-    alignment: Option<usize>,
-) -> *mut u8 {
-    let alignment = alignment.unwrap_or(4);
-    let mut size = size_init;
-
-    let alignment_offset = get_alignment_offset(arena, alignment);
-    size += alignment_offset;
-
-    debug_assert!((*arena).used + size <= (*arena).size);
-
-    let result = (*arena)
-        .base
-        .offset((*arena).used as isize + alignment_offset as isize);
-    (*arena).used += size;
-
-    debug_assert!(size >= size_init);
-
-    result
-}
-
-/// This pushes the size of the type specified times the count specified.
-///
-/// Note that you can use `PushStruct` to push a Rust array of whatever size
-/// (eg: `[u16; 20]`), which will have a similar effect, but this allows you to
-/// select a size to push at runtime, which cannot currently be done with
-/// PushStruct because Rust arrays must have a known size at compile time.
-unsafe fn push_array<T>(arena: *mut MemoryArena, count: usize) -> *mut T {
-    push_size(arena, size_of::<T>() * count, Some(align_of::<T>())) as *mut T
 }
 
 #[no_mangle]
@@ -127,53 +72,112 @@ pub unsafe extern "C" fn update_and_render(
 
         (*tile_map).tile_chunk_count_x = 128;
         (*tile_map).tile_chunk_count_y = 128;
+        (*tile_map).tile_chunk_count_z = 2;
         (*tile_map).tile_chunks = push_array::<TileChunk>(
             &mut (*game_state).world_arena,
-            ((*tile_map).tile_chunk_count_x * (*tile_map).tile_chunk_count_y) as usize,
+            ((*tile_map).tile_chunk_count_x
+                * (*tile_map).tile_chunk_count_y
+                * (*tile_map).tile_chunk_count_z) as usize,
         );
 
-        for y in 0..(*tile_map).tile_chunk_count_y {
-            for x in 0..(*tile_map).tile_chunk_count_x {
-                (*(*tile_map)
-                    .tile_chunks
-                    .offset((y * (*tile_map).tile_chunk_count_x + x) as isize))
-                .tiles = push_array::<u32>(
-                    &mut (*game_state).world_arena,
-                    ((*tile_map).chunk_dim * (*tile_map).chunk_dim) as usize,
-                );
-            }
-        }
-
         (*tile_map).tile_side_in_meters = 1.4;
-        (*tile_map).tile_side_in_pixels = 60;
-        (*tile_map).meters_to_pixels =
-            (*tile_map).tile_side_in_pixels as f32 / (*tile_map).tile_side_in_meters;
-
-        let lower_left_x = -((*tile_map).tile_side_in_pixels as f32 / 2.0);
-        let lower_left_y = (*buffer).height as f32;
 
         let tiles_per_width = 17;
         let tiles_per_height = 9;
-        for screen_y in 0..32 {
-            for screen_x in 0..32 {
-                for tile_y in 0..tiles_per_height {
-                    for tile_x in 0..tiles_per_width {
-                        let abs_tile_x = screen_x * tiles_per_width + tile_x;
-                        let abs_tile_y = screen_y * tiles_per_height + tile_y;
+        let mut screen_x = 0;
+        let mut screen_y = 0;
+        let mut abs_tile_z = 0;
 
-                        set_tile_value_abs(
-                            &(*game_state).world_arena,
-                            (*world).tile_map,
-                            abs_tile_x,
-                            abs_tile_y,
-                            if tile_x == tile_y && tile_y % 2 != 0 {
-                                1
-                            } else {
-                                0
-                            },
-                        );
+        //TODO: Replace all this with real world generation
+        let mut door_left = false;
+        let mut door_right = false;
+        let mut door_top = false;
+        let mut door_bottom = false;
+        let mut door_up = false;
+        let mut door_down = false;
+        for screen_index in 0..100 {
+            let mut rng = thread_rng();
+            let random_choice = if door_up || door_down {
+                rng.gen_range(0, 2)
+            } else {
+                rng.gen_range(0, 3)
+            };
+
+            match random_choice {
+                2 => {
+                    if abs_tile_z == 0 {
+                        door_up = true;
+                    } else {
+                        door_down = true;
                     }
                 }
+                1 => {
+                    door_right = true;
+                }
+                _ => {
+                    door_top = true;
+                }
+            }
+
+            for tile_y in 0..tiles_per_height {
+                for tile_x in 0..tiles_per_width {
+                    let abs_tile_x = screen_x * tiles_per_width + tile_x;
+                    let abs_tile_y = screen_y * tiles_per_height + tile_y;
+
+                    let tile_value = if door_down && tile_x == 10 && tile_y == 6 {
+                        4
+                    } else if door_up && tile_x == 10 && tile_y == 6 {
+                        3
+                    } else if ((tile_x == 0) && (!door_left || (tile_y != (tiles_per_height / 2))))
+                        || ((tile_x == (tiles_per_width - 1))
+                            && (!door_right || (tile_y != (tiles_per_height / 2))))
+                        || ((tile_y == 0) && (!door_bottom || (tile_x != (tiles_per_width / 2))))
+                        || ((tile_y == (tiles_per_height - 1))
+                            && (!door_top || (tile_x != (tiles_per_width / 2))))
+                    {
+                        2
+                    } else {
+                        1
+                    };
+
+                    set_tile_value_abs(
+                        &mut (*game_state).world_arena,
+                        (*world).tile_map,
+                        abs_tile_x,
+                        abs_tile_y,
+                        abs_tile_z,
+                        tile_value,
+                    );
+                }
+            }
+
+            door_left = door_right;
+            door_bottom = door_top;
+
+            if door_up {
+                door_down = true;
+                door_up = false;
+            } else if door_down {
+                door_up = true;
+                door_down = false;
+            } else {
+                door_up = false;
+                door_down = false;
+            }
+
+            door_right = false;
+            door_top = false;
+
+            match random_choice {
+                2 => {
+                    if abs_tile_z == 0 {
+                        abs_tile_z = 1;
+                    } else {
+                        abs_tile_z = 0;
+                    }
+                }
+                1 => screen_x += 1,
+                _ => screen_y += 1,
             }
         }
 
@@ -182,6 +186,12 @@ pub unsafe extern "C" fn update_and_render(
 
     let world = (*game_state).world;
     let tile_map = (*world).tile_map;
+
+    let tile_side_in_pixels = 60;
+    let meters_to_pixels = tile_side_in_pixels as f32 / (*tile_map).tile_side_in_meters;
+
+    let lower_left_x = -(tile_side_in_pixels as f32 / 2.0);
+    let lower_left_y = (*buffer).height as f32;
 
     for controller_index in 0..(*input).controllers.len() {
         let controller = common::get_controller(input, controller_index);
@@ -255,42 +265,46 @@ pub unsafe extern "C" fn update_and_render(
             let rel_column = c - 20;
             let column = ((*game_state).player_p.abs_tile_x as i32 + rel_column) as u32;
             let row = ((*game_state).player_p.abs_tile_y as i32 + rel_row) as u32;
-            let tile_id = get_tile_value_abs(tile_map, column, row);
-            let gray = if tile_id == 1 {
-                1.0
-            } else if column == (*game_state).player_p.abs_tile_x
-                && row == (*game_state).player_p.abs_tile_y
-            {
-                0.0
-            } else {
-                0.5
-            };
+            let tile_id =
+                get_tile_value_abs(tile_map, column, row, (*game_state).player_p.abs_tile_z);
 
-            let cen_x = screen_center_x
-                - (*tile_map).meters_to_pixels * (*game_state).player_p.tile_rel_x
-                + (rel_column * (*tile_map).tile_side_in_pixels) as f32;
-            let cen_y = screen_center_y
-                + (*tile_map).meters_to_pixels * (*game_state).player_p.tile_rel_y
-                - (rel_row * (*tile_map).tile_side_in_pixels) as f32;
-            let min_x = cen_x - 0.5 * (*tile_map).tile_side_in_pixels as f32;
-            let min_y = cen_y - 0.5 * (*tile_map).tile_side_in_pixels as f32;
-            let max_x = cen_x + 0.5 * (*tile_map).tile_side_in_pixels as f32;
-            let max_y = cen_y + 0.5 * (*tile_map).tile_side_in_pixels as f32;
-            draw_rectangle(&(*buffer), min_x, min_y, max_x, max_y, gray, gray, gray);
+            if tile_id > 0 {
+                let gray = if tile_id == 2 {
+                    1.0
+                } else if column == (*game_state).player_p.abs_tile_x
+                    && row == (*game_state).player_p.abs_tile_y
+                {
+                    0.0
+                } else if tile_id > 2 {
+                    0.25
+                } else {
+                    0.5
+                };
+
+                let cen_x = screen_center_x - meters_to_pixels * (*game_state).player_p.tile_rel_x
+                    + (rel_column * tile_side_in_pixels) as f32;
+                let cen_y = screen_center_y + meters_to_pixels * (*game_state).player_p.tile_rel_y
+                    - (rel_row * tile_side_in_pixels) as f32;
+                let min_x = cen_x - 0.5 * tile_side_in_pixels as f32;
+                let min_y = cen_y - 0.5 * tile_side_in_pixels as f32;
+                let max_x = cen_x + 0.5 * tile_side_in_pixels as f32;
+                let max_y = cen_y + 0.5 * tile_side_in_pixels as f32;
+                draw_rectangle(&(*buffer), min_x, min_y, max_x, max_y, gray, gray, gray);
+            }
         }
     }
 
     let player_r = 1.0;
     let player_g = 1.0;
     let player_b = 0.0;
-    let player_left = screen_center_x - 0.5 * (*tile_map).meters_to_pixels * PLAYER_WIDTH;
-    let player_top = screen_center_y - (*tile_map).meters_to_pixels * PLAYER_HEIGHT;
+    let player_left = screen_center_x - 0.5 * meters_to_pixels * PLAYER_WIDTH;
+    let player_top = screen_center_y - meters_to_pixels * PLAYER_HEIGHT;
     draw_rectangle(
         &(*buffer),
         player_left,
         player_top,
-        player_left + (*tile_map).meters_to_pixels * PLAYER_WIDTH,
-        player_top + (*tile_map).meters_to_pixels * PLAYER_HEIGHT,
+        player_left + meters_to_pixels * PLAYER_WIDTH,
+        player_top + meters_to_pixels * PLAYER_HEIGHT,
         player_r,
         player_g,
         player_b,

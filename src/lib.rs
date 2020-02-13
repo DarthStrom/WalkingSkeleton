@@ -324,8 +324,12 @@ pub unsafe extern "C" fn update_and_render(
         player_b,
     );
 
-    // draw_bitmap(&(*buffer), &(*game_state).hero_head, player_left, player_top);
-    draw_bitmap(&(*buffer), &(*game_state).hero_head, 0.0, 0.0);
+    draw_bitmap(
+        &(*buffer),
+        &(*game_state).hero_head,
+        player_left,
+        player_top,
+    );
 }
 
 /// This ensures that GameGetSoundSamples has a signature that will match what
@@ -461,8 +465,24 @@ unsafe fn draw_bitmap(
         #[allow(clippy::cast_ptr_alignment)]
         let mut dest = dest_row as *mut u32;
         for x in min_x..max_x {
-            let pixel = bitmap.get_pixel(x as u32, y as u32);
-            *dest = std::mem::transmute::<[u8; 4], u32>(pixel.to_bgra().0).to_le();
+            let pixel = bitmap.get_pixel((x - min_x) as u32, (y - min_y) as u32);
+
+            let a = (pixel[3] & 0xFF) as f32 / 255.0;
+            let sr = (pixel[0] & 0xFF) as f32;
+            let sg = (pixel[1] & 0xFF) as f32;
+            let sb = (pixel[2] & 0xFF) as f32;
+
+            let dr = ((*dest >> 16) & 0xFF) as f32;
+            let dg = ((*dest >> 8) & 0xFF) as f32;
+            let db = (*dest & 0xFF) as f32;
+
+            // TODO: Investigate premultiplied alpha
+            let r = (1.0 - a) * dr + a * sr;
+            let g = (1.0 - a) * dg + a * sg;
+            let b = (1.0 - a) * db + a * sb;
+
+            *dest = (((r + 0.5) as u32) << 16) | ((g + 0.5) as u32) << 8 | (b + 0.5) as u32;
+
             dest = dest.add(1);
         }
 

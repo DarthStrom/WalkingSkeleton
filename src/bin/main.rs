@@ -9,7 +9,6 @@ mod os;
 extern crate log;
 
 fn main() {
-    env_logger::init();
     // log levels: error, warn, info, debug, trace
     info!("starting up... log level: {}", log::max_level());
 

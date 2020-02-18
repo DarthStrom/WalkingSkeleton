@@ -18,16 +18,24 @@ struct World {
     tile_map: *mut TileMap,
 }
 
+struct HeroBitmaps {
+    align_x: i32,
+    align_y: i32,
+    head: DynamicImage,
+    cape: DynamicImage,
+    torso: DynamicImage,
+}
+
 struct State {
     world_arena: MemoryArena,
     world: *mut World,
 
+    camera_p: TileMapPosition,
     player_p: TileMapPosition,
 
     backdrop: DynamicImage,
-    hero_head: DynamicImage,
-    hero_cape: DynamicImage,
-    hero_torso: DynamicImage,
+    hero_facing_direction: usize,
+    hero_bitmaps: [HeroBitmaps; 4],
 }
 
 /// This ensures that GameUpdateAndRender has a signature that will match what
@@ -57,12 +65,51 @@ pub unsafe extern "C" fn update_and_render(
     if !(*memory).is_initialized {
         (*game_state).backdrop =
             image::open("data/test/test_background.bmp").expect("could not load background");
-        (*game_state).hero_head =
-            image::open("data/test/test_hero_front_head.bmp").expect("could not load head");
-        (*game_state).hero_cape =
-            image::open("data/test/test_hero_front_cape.bmp").expect("could not load cape");
-        (*game_state).hero_torso =
-            image::open("data/test/test_hero_front_torso.bmp").expect("could not load torso");
+
+        (*game_state).hero_bitmaps = [
+            HeroBitmaps {
+                head: image::open("data/test/test_hero_right_head.bmp")
+                    .expect("could not load right head"),
+                cape: image::open("data/test/test_hero_right_cape.bmp")
+                    .expect("could not load right cape"),
+                torso: image::open("data/test/test_hero_right_torso.bmp")
+                    .expect("could not load right torso"),
+                align_x: 72,
+                align_y: 182,
+            },
+            HeroBitmaps {
+                head: image::open("data/test/test_hero_back_head.bmp")
+                    .expect("could not load back head"),
+                cape: image::open("data/test/test_hero_back_cape.bmp")
+                    .expect("could not load back cape"),
+                torso: image::open("data/test/test_hero_back_torso.bmp")
+                    .expect("could not load back torso"),
+                align_x: 72,
+                align_y: 182,
+            },
+            HeroBitmaps {
+                head: image::open("data/test/test_hero_left_head.bmp")
+                    .expect("could not load left head"),
+                cape: image::open("data/test/test_hero_left_cape.bmp")
+                    .expect("could not load left cape"),
+                torso: image::open("data/test/test_hero_left_torso.bmp")
+                    .expect("could not load left torso"),
+                align_x: 72,
+                align_y: 182,
+            },
+            HeroBitmaps {
+                head: image::open("data/test/test_hero_front_head.bmp")
+                    .expect("could not load front head"),
+                cape: image::open("data/test/test_hero_front_cape.bmp")
+                    .expect("could not load front cape"),
+                torso: image::open("data/test/test_hero_front_torso.bmp")
+                    .expect("could not load front torso"),
+                align_x: 72,
+                align_y: 182,
+            },
+        ];
+        (*game_state).camera_p.abs_tile_x = 17 / 2;
+        (*game_state).camera_p.abs_tile_y = 9 / 2;
 
         (*game_state).player_p.abs_tile_x = 1;
         (*game_state).player_p.abs_tile_y = 3;
@@ -220,16 +267,20 @@ pub unsafe extern "C" fn update_and_render(
             };
             let d_player_y = player_speed
                 * if (*controller).move_up.ended_down {
+                    (*game_state).hero_facing_direction = 1;
                     1.0
                 } else if (*controller).move_down.ended_down {
+                    (*game_state).hero_facing_direction = 3;
                     -1.0
                 } else {
                     0.0
                 };
             let d_player_x = player_speed
                 * if (*controller).move_left.ended_down {
+                    (*game_state).hero_facing_direction = 2;
                     -1.0
                 } else if (*controller).move_right.ended_down {
+                    (*game_state).hero_facing_direction = 0;
                     1.0
                 } else {
                     0.0
@@ -265,6 +316,26 @@ pub unsafe extern "C" fn update_and_render(
                 }
                 (*game_state).player_p = new_player_p
             }
+
+            (*game_state).camera_p.abs_tile_z = (*game_state).player_p.abs_tile_z;
+
+            let diff = subtract(
+                &(*tile_map),
+                &(*game_state).player_p,
+                &(*game_state).camera_p,
+            );
+            if diff.dx > (9.0 * (*tile_map).tile_side_in_meters) {
+                (*game_state).camera_p.abs_tile_x += 17;
+            }
+            if diff.dx < -(9.0 * (*tile_map).tile_side_in_meters) {
+                (*game_state).camera_p.abs_tile_x -= 17;
+            }
+            if diff.dy > (5.0 * (*tile_map).tile_side_in_meters) {
+                (*game_state).camera_p.abs_tile_y += 9;
+            }
+            if diff.dy < -(5.0 * (*tile_map).tile_side_in_meters) {
+                (*game_state).camera_p.abs_tile_y -= 9;
+            }
         }
     }
 
@@ -277,16 +348,16 @@ pub unsafe extern "C" fn update_and_render(
         for c in 0..40 {
             let rel_row = r - 10;
             let rel_column = c - 20;
-            let column = ((*game_state).player_p.abs_tile_x as i32 + rel_column) as u32;
-            let row = ((*game_state).player_p.abs_tile_y as i32 + rel_row) as u32;
+            let column = ((*game_state).camera_p.abs_tile_x as i32 + rel_column) as u32;
+            let row = ((*game_state).camera_p.abs_tile_y as i32 + rel_row) as u32;
             let tile_id =
-                get_tile_value_abs(tile_map, column, row, (*game_state).player_p.abs_tile_z);
+                get_tile_value_abs(tile_map, column, row, (*game_state).camera_p.abs_tile_z);
 
             if tile_id > 1 {
                 let gray = if tile_id == 2 {
                     1.0
-                } else if column == (*game_state).player_p.abs_tile_x
-                    && row == (*game_state).player_p.abs_tile_y
+                } else if column == (*game_state).camera_p.abs_tile_x
+                    && row == (*game_state).camera_p.abs_tile_y
                 {
                     0.0
                 } else if tile_id > 2 {
@@ -295,9 +366,9 @@ pub unsafe extern "C" fn update_and_render(
                     0.5
                 };
 
-                let cen_x = screen_center_x - meters_to_pixels * (*game_state).player_p.offset_x
+                let cen_x = screen_center_x - meters_to_pixels * (*game_state).camera_p.offset_x
                     + (rel_column * tile_side_in_pixels) as f32;
-                let cen_y = screen_center_y + meters_to_pixels * (*game_state).player_p.offset_y
+                let cen_y = screen_center_y + meters_to_pixels * (*game_state).camera_p.offset_y
                     - (rel_row * tile_side_in_pixels) as f32;
                 let min_x = cen_x - 0.5 * tile_side_in_pixels as f32;
                 let min_y = cen_y - 0.5 * tile_side_in_pixels as f32;
@@ -308,11 +379,19 @@ pub unsafe extern "C" fn update_and_render(
         }
     }
 
+    let diff = subtract(
+        &(*tile_map),
+        &(*game_state).player_p,
+        &(*game_state).camera_p,
+    );
+
     let player_r = 1.0;
     let player_g = 1.0;
     let player_b = 0.0;
-    let player_left = screen_center_x - 0.5 * meters_to_pixels * PLAYER_WIDTH;
-    let player_top = screen_center_y - meters_to_pixels * PLAYER_HEIGHT;
+    let player_ground_point_x = screen_center_x + meters_to_pixels * diff.dx;
+    let player_ground_point_y = screen_center_y - meters_to_pixels * diff.dy;
+    let player_left = player_ground_point_x - 0.5 * meters_to_pixels * PLAYER_WIDTH;
+    let player_top = player_ground_point_y - meters_to_pixels * PLAYER_HEIGHT;
     draw_rectangle(
         &(*buffer),
         player_left,
@@ -324,11 +403,30 @@ pub unsafe extern "C" fn update_and_render(
         player_b,
     );
 
-    draw_bitmap(
+    let hero_bitmaps = &(*game_state).hero_bitmaps[(*game_state).hero_facing_direction];
+    draw_bitmap_align(
         &(*buffer),
-        &(*game_state).hero_head,
-        player_left,
-        player_top,
+        &hero_bitmaps.torso,
+        player_ground_point_x,
+        player_ground_point_y,
+        hero_bitmaps.align_x,
+        hero_bitmaps.align_y,
+    );
+    draw_bitmap_align(
+        &(*buffer),
+        &hero_bitmaps.cape,
+        player_ground_point_x,
+        player_ground_point_y,
+        hero_bitmaps.align_x,
+        hero_bitmaps.align_y,
+    );
+    draw_bitmap_align(
+        &(*buffer),
+        &hero_bitmaps.head,
+        player_ground_point_x,
+        player_ground_point_y,
+        hero_bitmaps.align_x,
+        hero_bitmaps.align_y,
     );
 }
 
@@ -432,6 +530,22 @@ fn draw_rectangle(
     }
 }
 
+unsafe fn draw_bitmap_align(
+    buffer: &GameOffscreenBuffer,
+    bitmap: &DynamicImage,
+    real_x: f32,
+    real_y: f32,
+    align_x: i32,
+    align_y: i32,
+) {
+    draw_bitmap(
+        buffer,
+        bitmap,
+        real_x - align_x as f32,
+        real_y - align_y as f32,
+    );
+}
+
 unsafe fn draw_bitmap(
     buffer: &GameOffscreenBuffer,
     bitmap: &DynamicImage,
@@ -443,11 +557,15 @@ unsafe fn draw_bitmap(
     let mut max_x = real_x as i32 + bitmap.width() as i32;
     let mut max_y = real_y as i32 + bitmap.height() as i32;
 
+    let mut source_offset_x = 0;
     if min_x < 0 {
+        source_offset_x = -min_x;
         min_x = 0;
     }
 
+    let mut source_offset_y = 0;
     if min_y < 0 {
+        source_offset_y = -min_y;
         min_y = 0;
     }
 
@@ -465,23 +583,32 @@ unsafe fn draw_bitmap(
         #[allow(clippy::cast_ptr_alignment)]
         let mut dest = dest_row as *mut u32;
         for x in min_x..max_x {
-            let pixel = bitmap.get_pixel((x - min_x) as u32, (y - min_y) as u32);
+            let source_x = (source_offset_x + x - min_x) as u32;
+            let source_y = (source_offset_y + y - min_y) as u32;
 
-            let a = (pixel[3] & 0xFF) as f32 / 255.0;
-            let sr = (pixel[0] & 0xFF) as f32;
-            let sg = (pixel[1] & 0xFF) as f32;
-            let sb = (pixel[2] & 0xFF) as f32;
+            if source_x > 0
+                && source_x < bitmap.width()
+                && source_y > 0
+                && source_y < bitmap.height()
+            {
+                let pixel = bitmap.get_pixel(source_x, source_y);
 
-            let dr = ((*dest >> 16) & 0xFF) as f32;
-            let dg = ((*dest >> 8) & 0xFF) as f32;
-            let db = (*dest & 0xFF) as f32;
+                let a = (pixel[3] & 0xFF) as f32 / 255.0;
+                let sr = (pixel[0] & 0xFF) as f32;
+                let sg = (pixel[1] & 0xFF) as f32;
+                let sb = (pixel[2] & 0xFF) as f32;
 
-            // TODO: Investigate premultiplied alpha
-            let r = (1.0 - a) * dr + a * sr;
-            let g = (1.0 - a) * dg + a * sg;
-            let b = (1.0 - a) * db + a * sb;
+                let dr = ((*dest >> 16) & 0xFF) as f32;
+                let dg = ((*dest >> 8) & 0xFF) as f32;
+                let db = (*dest & 0xFF) as f32;
 
-            *dest = (((r + 0.5) as u32) << 16) | ((g + 0.5) as u32) << 8 | (b + 0.5) as u32;
+                // TODO: Investigate premultiplied alpha
+                let r = (1.0 - a) * dr + a * sr;
+                let g = (1.0 - a) * dg + a * sg;
+                let b = (1.0 - a) * db + a * sb;
+
+                *dest = (((r + 0.5) as u32) << 16) | ((g + 0.5) as u32) << 8 | (b + 0.5) as u32;
+            }
 
             dest = dest.add(1);
         }

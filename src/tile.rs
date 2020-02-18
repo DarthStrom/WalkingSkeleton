@@ -1,5 +1,11 @@
 use crate::common::*;
 
+pub struct TileMapDifference {
+    pub dx: f32,
+    pub dy: f32,
+    pub dz: f32,
+}
+
 #[derive(Clone)]
 pub struct TileMapPosition {
     // These are fixed point tile locations. The high
@@ -208,4 +214,17 @@ pub fn recanonicalize_position(tile_map: &TileMap, pos: TileMapPosition) -> Tile
 
 pub fn are_on_same_tile(a: &TileMapPosition, b: &TileMapPosition) -> bool {
     a.abs_tile_x == b.abs_tile_x && a.abs_tile_y == b.abs_tile_y && a.abs_tile_z == b.abs_tile_z
+}
+
+pub fn subtract(tile_map: &TileMap, a: &TileMapPosition, b: &TileMapPosition) -> TileMapDifference {
+    let d_tile_x = a.abs_tile_x as f32 - b.abs_tile_x as f32;
+    let d_tile_y = a.abs_tile_y as f32 - b.abs_tile_y as f32;
+    let d_tile_z = a.abs_tile_z as f32 - b.abs_tile_z as f32;
+
+    TileMapDifference {
+        dx: tile_map.tile_side_in_meters * d_tile_x + (a.offset_x - b.offset_x),
+        dy: tile_map.tile_side_in_meters * d_tile_y + (a.offset_y - b.offset_y),
+        // TODO: think about what to do about z
+        dz: tile_map.tile_side_in_meters * d_tile_z,
+    }
 }

@@ -168,35 +168,43 @@ unsafe fn get_last_write_time(filename: &[u16; MAX_PATH]) -> FILETIME {
 unsafe fn load_game_code(
     source_dll_path: &[u16; MAX_PATH],
     temp_dll_path: &[u16; MAX_PATH],
+    lock_file_name: &[u16; MAX_PATH],
 ) -> GameCode {
     trace!("==load_game_code==");
     let mut result: GameCode = zeroed();
+    let mut ignored: WIN32_FILE_ATTRIBUTE_DATA = zeroed();
+    if GetFileAttributesExW(
+        lock_file_name.as_ptr(),
+        GetFileExInfoStandard,
+        &mut ignored as *mut WIN32_FILE_ATTRIBUTE_DATA as *mut c_void,
+    ) == 0
+    {
+        // TODO: Automatic determination of when updates are necessary.
 
-    // TODO: Automatic determination of when updates are necessary.
+        CopyFileW(source_dll_path.as_ptr(), temp_dll_path.as_ptr(), FALSE);
+        result.game_code_dll = LoadLibraryW(temp_dll_path.as_ptr());
+        if !result.game_code_dll.is_null() {
+            let c_update_and_render = CString::new("update_and_render").unwrap();
+            let c_get_sound_samples = CString::new("get_sound_samples").unwrap();
 
-    CopyFileW(source_dll_path.as_ptr(), temp_dll_path.as_ptr(), FALSE);
-    result.game_code_dll = LoadLibraryW(temp_dll_path.as_ptr());
-    if !result.game_code_dll.is_null() {
-        let c_update_and_render = CString::new("update_and_render").unwrap();
-        let c_get_sound_samples = CString::new("get_sound_samples").unwrap();
+            let update_and_render_ptr =
+                GetProcAddress(result.game_code_dll, c_update_and_render.as_ptr());
+            let get_sound_samples_ptr =
+                GetProcAddress(result.game_code_dll, c_get_sound_samples.as_ptr());
 
-        let update_and_render_ptr =
-            GetProcAddress(result.game_code_dll, c_update_and_render.as_ptr());
-        let get_sound_samples_ptr =
-            GetProcAddress(result.game_code_dll, c_get_sound_samples.as_ptr());
-
-        result.update_and_render = transmute(update_and_render_ptr);
-        result.get_sound_samples = transmute(get_sound_samples_ptr);
-        result.is_valid = !update_and_render_ptr.is_null() && !get_sound_samples_ptr.is_null();
-        if result.is_valid {
-            trace!("successfully loaded game functions")
+            result.update_and_render = transmute(update_and_render_ptr);
+            result.get_sound_samples = transmute(get_sound_samples_ptr);
+            result.is_valid = !update_and_render_ptr.is_null() && !get_sound_samples_ptr.is_null();
+            if result.is_valid {
+                trace!("successfully loaded game functions")
+            } else {
+                error!("could not get the function pointers");
+                result.update_and_render = zeroed();
+                result.get_sound_samples = zeroed();
+            }
         } else {
-            error!("could not get the function pointers");
-            result.update_and_render = zeroed();
-            result.get_sound_samples = zeroed();
+            error!("could not load game code dll");
         }
-    } else {
-        error!("could not load game code dll");
     }
 
     trace!("==load_game_code DONE==");
@@ -956,6 +964,8 @@ pub fn main() {
             "game_temp.dll",
             &mut temp_game_code_dll_full_path,
         );
+        let mut game_code_lock_full_path: [u16; MAX_PATH] = [0; MAX_PATH];
+        build_exe_path_file_name(&win32_state, "lock.tmp", &mut game_code_lock_full_path);
 
         // Set the Windows scheduler granularity to 1ms
         // so that our Sleep() can be more granular
@@ -1156,6 +1166,7 @@ pub fn main() {
                     let mut game = load_game_code(
                         &source_game_code_dll_full_path,
                         &temp_game_code_dll_full_path,
+                        &game_code_lock_full_path,
                     );
 
                     while GLOBAL_RUNNING {
@@ -1167,6 +1178,7 @@ pub fn main() {
                             game = load_game_code(
                                 &source_game_code_dll_full_path,
                                 &temp_game_code_dll_full_path,
+                                &game_code_lock_full_path,
                             );
                         }
 

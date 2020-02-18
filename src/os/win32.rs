@@ -1,5 +1,24 @@
 //! equivalent to win32_handmade.cpp
 
+/*
+  TODO:  THIS IS NOT A FINAL PLATFORM LAYER!!!
+  - Make the right calls so Windows doesn't think we're "still loading" for a bit after we actually start
+  - Saved game locations
+  - Getting a handle to our own executable file
+  - Asset loading path
+  - Threading (launch a thread)
+  - Raw Input (support for multiple keyboards)
+  - ClipCursor() (for multimonitor support)
+  - QueryCancelAutoplay
+  - WM_ACTIVATEAPP (for when we are not the active application)
+  - Blit speed improvements (BitBlt)
+  - Hardware acceleration (OpenGL or Direct3D or BOTH??)
+  - GetKeyboardLayout (for French keyboards, international WASD support)
+  - ChangeDisplaySettings option if we detect slow fullscreen blit?
+
+   Just a partial list of stuff!!
+*/
+
 use crate::common::*;
 use std::{ffi::*, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
@@ -61,8 +80,6 @@ struct DebugTimeMarker {
 
 static mut GLOBAL_RUNNING: bool = true;
 static mut GLOBAL_PAUSE: bool = false;
-static mut GLOBAL_PERF_COUNT_FREQUENCY: i64 = 0;
-static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
 static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     info: BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -90,6 +107,22 @@ static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     height: 0,
     pitch: 0,
     bytes_per_pixel: 4,
+};
+static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
+static mut GLOBAL_PERF_COUNT_FREQUENCY: i64 = 0;
+static mut GLOBAL_SHOW_CURSOR: bool = false;
+static mut GLOBAL_WINDOW_POSITION: WINDOWPLACEMENT = WINDOWPLACEMENT {
+    length: 0,
+    flags: 0,
+    showCmd: 0,
+    ptMinPosition: POINT { x: 0, y: 0 },
+    ptMaxPosition: POINT { x: 0, y: 0 },
+    rcNormalPosition: RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    },
 };
 
 fn win32_string(value: &str) -> Vec<u16> {
@@ -337,46 +370,66 @@ unsafe fn display_buffer_in_window(
     window_width: i32,
     window_height: i32,
 ) {
-    let offset_x = 10;
-    let offset_y = 10;
+    // TODO: Centering / black bars?
 
-    PatBlt(device_context, 0, 0, window_width, offset_y, BLACKNESS);
-    PatBlt(
-        device_context,
-        0,
-        offset_y + buffer.height,
-        window_width,
-        window_height,
-        BLACKNESS,
-    );
-    PatBlt(device_context, 0, 0, offset_x, window_height, BLACKNESS);
-    PatBlt(
-        device_context,
-        offset_x + buffer.width,
-        0,
-        window_width,
-        window_height,
-        BLACKNESS,
-    );
+    if (window_width >= buffer.width * 2) && (window_height >= buffer.height * 2) {
+        StretchDIBits(
+            device_context,
+            0,
+            0,
+            2 * buffer.width,
+            2 * buffer.height,
+            0,
+            0,
+            buffer.width,
+            buffer.height,
+            buffer.memory,
+            &buffer.info,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        );
+    } else {
+        let offset_x = 10;
+        let offset_y = 10;
 
-    // For prototyping purposes, we're going to always blit
-    // 1-to-1 pixels to make sure we don't introduce artifacts with
-    // stretching while we are learning to code the renderer
-    StretchDIBits(
-        device_context,
-        offset_x,
-        offset_y,
-        buffer.width,
-        buffer.height,
-        0,
-        0,
-        buffer.width,
-        buffer.height,
-        buffer.memory,
-        &buffer.info,
-        DIB_RGB_COLORS,
-        SRCCOPY,
-    );
+        PatBlt(device_context, 0, 0, window_width, offset_y, BLACKNESS);
+        PatBlt(
+            device_context,
+            0,
+            offset_y + buffer.height,
+            window_width,
+            window_height,
+            BLACKNESS,
+        );
+        PatBlt(device_context, 0, 0, offset_x, window_height, BLACKNESS);
+        PatBlt(
+            device_context,
+            offset_x + buffer.width,
+            0,
+            window_width,
+            window_height,
+            BLACKNESS,
+        );
+
+        // For prototyping purposes, we're going to always blit
+        // 1-to-1 pixels to make sure we don't introduce artifacts with
+        // stretching while we are learning to code the renderer
+        StretchDIBits(
+            device_context,
+            offset_x,
+            offset_y,
+            buffer.width,
+            buffer.height,
+            0,
+            0,
+            buffer.width,
+            buffer.height,
+            buffer.memory,
+            &buffer.info,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        );
+    }
 }
 
 unsafe extern "system" fn main_window_callback(
@@ -388,6 +441,14 @@ unsafe extern "system" fn main_window_callback(
     let mut result = 0;
 
     match message {
+        WM_CLOSE | WM_DESTROY => GLOBAL_RUNNING = false,
+        WM_SETCURSOR => {
+            if GLOBAL_SHOW_CURSOR {
+                result = DefWindowProcW(window, message, w_param, l_param);
+            } else {
+                SetCursor(null_mut());
+            }
+        }
         WM_ACTIVATEAPP => {
             // if w_param > 0 {
             //     SetLayeredWindowAttributes(window, RGB(0, 0, 0), 255, LWA_ALPHA);
@@ -395,7 +456,6 @@ unsafe extern "system" fn main_window_callback(
             //     SetLayeredWindowAttributes(window, RGB(0, 0, 0), 64, LWA_ALPHA);
             // }
         }
-        WM_CLOSE | WM_DESTROY => GLOBAL_RUNNING = false,
         WM_KEYUP | WM_KEYDOWN => panic!("Keyboard input came in through a non-dispatch message!"),
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
@@ -650,6 +710,43 @@ unsafe fn play_back_input(state: &mut State, new_input: *mut GameInput) {
     }
 }
 
+unsafe fn toggle_fullscreen(window: HWND) {
+    let style = GetWindowLongW(window, GWL_STYLE);
+    if (style & (WS_OVERLAPPEDWINDOW as i32)) != 0 {
+        let mut monitor_info: MONITORINFO = zeroed();
+        monitor_info.cbSize = size_of::<MONITORINFO>() as u32;
+        let placement_success = GetWindowPlacement(window, &mut GLOBAL_WINDOW_POSITION) != 0;
+        let monitor_info_success = GetMonitorInfoW(
+            MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY),
+            &mut monitor_info,
+        ) != 0;
+        if placement_success && monitor_info_success {
+            SetWindowLongW(window, GWL_STYLE, style & (!WS_OVERLAPPEDWINDOW as i32));
+            SetWindowPos(
+                window,
+                HWND_TOP,
+                monitor_info.rcMonitor.left,
+                monitor_info.rcMonitor.top,
+                monitor_info.rcMonitor.right - monitor_info.rcMonitor.left,
+                monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top,
+                SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            );
+        }
+    } else {
+        SetWindowLongW(window, GWL_STYLE, style | (WS_OVERLAPPEDWINDOW as i32));
+        SetWindowPlacement(window, &GLOBAL_WINDOW_POSITION);
+        SetWindowPos(
+            window,
+            null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+        );
+    }
+}
+
 unsafe fn process_pending_messages(
     state: &mut State,
     keyboard_controller: &mut GameControllerInput,
@@ -658,7 +755,7 @@ unsafe fn process_pending_messages(
     while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
         match message.message {
             WM_QUIT => GLOBAL_RUNNING = false,
-            WM_KEYDOWN | WM_KEYUP => {
+            WM_SYSKEYDOWN | WM_SYSKEYUP | WM_KEYDOWN | WM_KEYUP => {
                 // letting windows handle WM_SYSKEYUP and WM_SYSKEYDOWN
                 // so I don't have to detect Alt-F4 etc.
                 let vk_code = message.wParam as i32;
@@ -750,6 +847,16 @@ unsafe fn process_pending_messages(
                         }
                         _ => {}
                     };
+
+                    if is_down {
+                        let alt_key_was_down = (message.lParam & (1 << 29)) != 0;
+                        if vk_code == VK_F4 && alt_key_was_down {
+                            GLOBAL_RUNNING = false;
+                        }
+                        if vk_code == VK_RETURN && alt_key_was_down && !message.hwnd.is_null() {
+                            toggle_fullscreen(message.hwnd);
+                        }
+                    }
                 }
             }
             _ => {
@@ -971,7 +1078,10 @@ pub fn main() {
         // so that our Sleep() can be more granular
         let desired_scheduler_ms = 1;
         let sleep_is_granular = timeBeginPeriod(desired_scheduler_ms) == TIMERR_NOERROR;
-
+        #[cfg(debug_assertions)]
+        {
+            GLOBAL_SHOW_CURSOR = true;
+        }
         let window_class = WNDCLASSW {
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(main_window_callback),
@@ -980,7 +1090,7 @@ pub fn main() {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hIcon: null_mut(),
-            hCursor: null_mut(),
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             hbrBackground: null_mut(),
             lpszMenuName: null_mut(),
         };

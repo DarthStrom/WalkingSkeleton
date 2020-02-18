@@ -5,7 +5,7 @@ mod tile;
 
 use common::*;
 use core::mem::*;
-use image::{DynamicImage, GenericImageView, Pixel};
+use image::{DynamicImage, GenericImageView};
 use rand::prelude::*;
 use tile::*;
 
@@ -593,10 +593,10 @@ unsafe fn draw_bitmap(
             {
                 let pixel = bitmap.get_pixel(source_x, source_y);
 
-                let a = (pixel[3] & 0xFF) as f32 / 255.0;
-                let sr = (pixel[0] & 0xFF) as f32;
-                let sg = (pixel[1] & 0xFF) as f32;
-                let sb = (pixel[2] & 0xFF) as f32;
+                let a = pixel[3] as f32 / 255.0;
+                let sr = pixel[0] as f32;
+                let sg = pixel[1] as f32;
+                let sb = pixel[2] as f32;
 
                 let dr = ((*dest >> 16) & 0xFF) as f32;
                 let dg = ((*dest >> 8) & 0xFF) as f32;

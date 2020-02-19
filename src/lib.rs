@@ -586,11 +586,7 @@ unsafe fn draw_bitmap(
             let source_x = (source_offset_x + x - min_x) as u32;
             let source_y = (source_offset_y + y - min_y) as u32;
 
-            if source_x > 0
-                && source_x < bitmap.width()
-                && source_y > 0
-                && source_y < bitmap.height()
-            {
+            if source_x < bitmap.width() && source_y < bitmap.height() {
                 let pixel = bitmap.get_pixel(source_x, source_y);
 
                 let a = pixel[3] as f32 / 255.0;

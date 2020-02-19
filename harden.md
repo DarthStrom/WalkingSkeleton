@@ -1,7 +1,6 @@
 Things to do once it works to harden
 ====================================
 
-- fix off by one error in bmp rendering code
 - debug audio
 - change character bmp to skeleton character
 - get rid of as much unsafe as we can

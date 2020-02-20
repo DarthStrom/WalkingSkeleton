@@ -83,13 +83,6 @@ pub struct GameOffscreenBuffer {
     pub bytes_per_pixel: i32,
 }
 
-pub struct GameSoundOutputBuffer {
-    pub samples_per_second: u32,
-    pub sample_count: u32,
-    // IMPORTANT: samples must be padded to a multiple of 4
-    pub samples: *mut i16,
-}
-
 #[derive(Debug, Default)]
 pub struct GameButtonState {
     pub half_transition_count: i32,
@@ -144,7 +137,6 @@ pub struct GameMemory {
 
 pub type GameUpdateAndRender =
     unsafe extern "C" fn(*mut GameMemory, *mut GameInput, *mut GameOffscreenBuffer);
-pub type GameGetSoundSamples = unsafe extern "C" fn(*mut GameMemory, *mut GameSoundOutputBuffer);
 
 pub unsafe fn get_controller(
     input: *mut GameInput,

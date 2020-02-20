@@ -23,11 +23,11 @@ use crate::common::*;
 use std::{ffi::*, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
 use winapi::{
     ctypes::c_void,
-    shared::{minwindef::LRESULT, minwindef::*, mmreg::*, windef::*, winerror::*},
+    shared::{minwindef::LRESULT, minwindef::*, windef::*, winerror::*},
     um::{
-        dsound::*, errhandlingapi::GetLastError, fileapi::*, handleapi::*, libloaderapi::*,
-        memoryapi::*, minwinbase::*, mmsystem::*, profileapi::*, synchapi::*, timeapi::*,
-        winbase::*, wingdi::*, winnt::*, winuser::*, xinput::*,
+        errhandlingapi::GetLastError, fileapi::*, handleapi::*, libloaderapi::*, memoryapi::*,
+        minwinbase::*, mmsystem::*, profileapi::*, synchapi::*, timeapi::*, winbase::*, wingdi::*,
+        winnt::*, winuser::*, xinput::*,
     },
 };
 
@@ -52,30 +52,9 @@ struct OffscreenBuffer {
     bytes_per_pixel: i32,
 }
 
-struct SoundOutput {
-    running_sample_index: u32,
-    bytes_per_sample: u32,
-    sound_buffer_size: DWORD,
-    safety_bytes: DWORD,
-    samples_per_second: u32,
-    // TODO: Should running sample index be in bytes as well?
-    // TODO: Math gets simpler if we add a "bytes per second" field?
-}
-
 struct WindowDimension {
     width: i32,
     height: i32,
-}
-
-struct DebugTimeMarker {
-    output_play_cursor: DWORD,
-    output_write_cursor: DWORD,
-    output_location: DWORD,
-    output_byte_count: DWORD,
-    expected_flip_play_cursor: DWORD,
-
-    flip_play_cursor: DWORD,
-    flip_write_cursor: DWORD,
 }
 
 static mut GLOBAL_RUNNING: bool = true;
@@ -108,7 +87,6 @@ static mut GLOBAL_BACK_BUFFER: OffscreenBuffer = OffscreenBuffer {
     pitch: 0,
     bytes_per_pixel: 4,
 };
-static mut GLOBAL_SOUND_BUFFER: LPDIRECTSOUNDBUFFER = null_mut();
 static mut GLOBAL_PERF_COUNT_FREQUENCY: i64 = 0;
 static mut GLOBAL_SHOW_CURSOR: bool = false;
 static mut GLOBAL_WINDOW_POSITION: WINDOWPLACEMENT = WINDOWPLACEMENT {
@@ -161,7 +139,6 @@ struct GameCode {
     game_code_dll: HMODULE,
     dll_last_write_time: FILETIME,
     update_and_render: GameUpdateAndRender,
-    get_sound_samples: GameGetSoundSamples,
     is_valid: bool,
 }
 
@@ -218,22 +195,17 @@ unsafe fn load_game_code(
         result.game_code_dll = LoadLibraryW(temp_dll_path.as_ptr());
         if !result.game_code_dll.is_null() {
             let c_update_and_render = CString::new("update_and_render").unwrap();
-            let c_get_sound_samples = CString::new("get_sound_samples").unwrap();
 
             let update_and_render_ptr =
                 GetProcAddress(result.game_code_dll, c_update_and_render.as_ptr());
-            let get_sound_samples_ptr =
-                GetProcAddress(result.game_code_dll, c_get_sound_samples.as_ptr());
 
             result.update_and_render = transmute(update_and_render_ptr);
-            result.get_sound_samples = transmute(get_sound_samples_ptr);
-            result.is_valid = !update_and_render_ptr.is_null() && !get_sound_samples_ptr.is_null();
+            result.is_valid = !update_and_render_ptr.is_null();
             if result.is_valid {
                 trace!("successfully loaded game functions")
             } else {
                 error!("could not get the function pointers");
                 result.update_and_render = zeroed();
-                result.get_sound_samples = zeroed();
             }
         } else {
             error!("could not load game code dll");
@@ -263,66 +235,6 @@ unsafe fn unload_game_code(game_code: &mut GameCode) {
 // TODO: investigate XAudio2
 // waiting on https://github.com/retep998/winapi-rs/pull/602
 // or WASAPI
-unsafe fn init_direct_sound(window: HWND, samples_per_second: u32, buffer_size: u32) {
-    let mut direct_sound_ptr: LPDIRECTSOUND = zeroed();
-    match DirectSoundCreate(null_mut(), &mut direct_sound_ptr, null_mut()) {
-        DS_OK => {
-            let direct_sound = &*direct_sound_ptr;
-
-            let bits_per_sample = 16;
-            let channels = 2;
-            let block_alignment = channels * bits_per_sample / 8;
-            let mut wave_format = WAVEFORMATEX {
-                wFormatTag: WAVE_FORMAT_PCM,
-                nChannels: channels,
-                nSamplesPerSec: samples_per_second,
-                nAvgBytesPerSec: samples_per_second * block_alignment as u32,
-                nBlockAlign: block_alignment,
-                wBitsPerSample: bits_per_sample,
-                cbSize: 0,
-            };
-
-            match direct_sound.SetCooperativeLevel(window, DSSCL_PRIORITY) {
-                DS_OK => {
-                    let mut buffer_description: DSBUFFERDESC = zeroed();
-                    buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
-                    buffer_description.dwFlags = DSBCAPS_PRIMARYBUFFER;
-                    let mut primary_buffer: LPDIRECTSOUNDBUFFER = zeroed();
-
-                    match direct_sound.CreateSoundBuffer(
-                        &buffer_description,
-                        &mut primary_buffer,
-                        null_mut(),
-                    ) {
-                        DS_OK => match (*primary_buffer).SetFormat(&wave_format) {
-                            DS_OK => info!("Successfully set the wave format"),
-                            e => error!("Couldn't set the wave format: {:x}", e),
-                        },
-                        e => error!("Couldn't create the primary sound buffer: {:x}", e),
-                    }
-                }
-                e => error!("Couldn't set the cooperative level: {:x}", e),
-            }
-
-            let mut buffer_description: DSBUFFERDESC = zeroed();
-            buffer_description.dwSize = size_of::<DSBUFFERDESC>() as u32;
-            buffer_description.dwFlags = DSBCAPS_GETCURRENTPOSITION2;
-            buffer_description.dwBufferBytes = buffer_size;
-            buffer_description.lpwfxFormat = &mut wave_format;
-            match direct_sound.CreateSoundBuffer(
-                &buffer_description,
-                &mut GLOBAL_SOUND_BUFFER,
-                null_mut(),
-            ) {
-                DS_OK => info!("Secondary buffer created successfully"),
-                e => error!("Couldn't create the secondary sound buffer: {:x}", e),
-            }
-        }
-        e => {
-            error!("Couldn't create direct sound object: {:x}", e);
-        }
-    }
-}
 
 unsafe fn get_window_dimension(window: HWND) -> WindowDimension {
     let mut client_rect = zeroed();
@@ -477,86 +389,6 @@ unsafe extern "system" fn main_window_callback(
     }
 
     result
-}
-
-unsafe fn clear_sound_buffer(sound_output: &SoundOutput) {
-    let mut region1 = zeroed();
-    let mut region1_size = zeroed();
-    let mut region2 = zeroed();
-    let mut region2_size = zeroed();
-    match (*GLOBAL_SOUND_BUFFER).Lock(
-        0,
-        sound_output.sound_buffer_size,
-        &mut region1,
-        &mut region1_size,
-        &mut region2,
-        &mut region2_size,
-        0,
-    ) {
-        DS_OK => {
-            let mut dest_sample = region1 as *mut u8;
-            for _ in 0..region1_size {
-                *dest_sample = 0;
-                dest_sample = dest_sample.wrapping_offset(1);
-            }
-            dest_sample = region2 as *mut u8;
-            for _ in 0..region2_size {
-                *dest_sample = 0;
-                dest_sample = dest_sample.wrapping_offset(1);
-            }
-            (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
-        }
-        e => error!("Could not lock the sound buffer to clear it: {:x}", e),
-    }
-}
-
-unsafe fn fill_sound_buffer(
-    sound_output: &mut SoundOutput,
-    byte_to_lock: u32,
-    bytes_to_write: u32,
-    source_buffer: &mut GameSoundOutputBuffer,
-) {
-    let mut region1 = zeroed();
-    let mut region1_size = zeroed();
-    let mut region2 = zeroed();
-    let mut region2_size = zeroed();
-    match (*GLOBAL_SOUND_BUFFER).Lock(
-        byte_to_lock,
-        bytes_to_write,
-        &mut region1,
-        &mut region1_size,
-        &mut region2,
-        &mut region2_size,
-        0,
-    ) {
-        DS_OK => {
-            let region1_sample_count = region1_size / sound_output.bytes_per_sample;
-            let mut source_sample = source_buffer.samples;
-            let mut dest_sample = region1 as *mut i16;
-            for _ in 0..region1_sample_count {
-                *dest_sample = *source_sample;
-                dest_sample = dest_sample.offset(1);
-                source_sample = source_sample.offset(1);
-                *dest_sample = *source_sample;
-                dest_sample = dest_sample.offset(1);
-                source_sample = source_sample.offset(1);
-                sound_output.running_sample_index += 1;
-            }
-            let region2_sample_count = region2_size / sound_output.bytes_per_sample;
-            dest_sample = region2 as *mut i16;
-            for _ in 0..region2_sample_count {
-                *dest_sample = *source_sample;
-                dest_sample = dest_sample.offset(1);
-                source_sample = source_sample.offset(1);
-                *dest_sample = *source_sample;
-                dest_sample = dest_sample.offset(1);
-                source_sample = source_sample.offset(1);
-                sound_output.running_sample_index += 1;
-            }
-            (*GLOBAL_SOUND_BUFFER).Unlock(region1, region1_size, region2, region2_size);
-        }
-        e => error!("Could not lock sound buffer for filling: {:x}", e),
-    }
 }
 
 fn process_keyboard_message(new_state: &mut GameButtonState, is_down: bool) {
@@ -879,175 +711,6 @@ fn get_seconds_elapsed(start: LARGE_INTEGER, end: LARGE_INTEGER) -> f32 {
     unsafe { (end.QuadPart() - start.QuadPart()) as f32 / GLOBAL_PERF_COUNT_FREQUENCY as f32 }
 }
 
-unsafe fn debug_draw_vertical(
-    back_buffer: &OffscreenBuffer,
-    x: i32,
-    top: i32,
-    bottom: i32,
-    color: u32,
-) {
-    let actual_top = if top <= 0 { 0 } else { top };
-
-    let actual_bottom = if bottom > back_buffer.height {
-        back_buffer.height
-    } else {
-        bottom
-    };
-
-    if (x >= 0) && (x < back_buffer.width) {
-        let mut pixel = back_buffer
-            .memory
-            .offset((x * back_buffer.bytes_per_pixel + actual_top * back_buffer.pitch) as isize)
-            as *mut u8;
-        #[allow(clippy::cast_ptr_alignment)]
-        for _ in actual_top..actual_bottom {
-            *(pixel as *mut u32) = color;
-            pixel = pixel.offset(back_buffer.pitch as isize);
-        }
-    }
-}
-
-fn debug_draw_sound_buffer_marker(
-    back_buffer: &OffscreenBuffer,
-    c: f32,
-    pad_x: i32,
-    top: i32,
-    bottom: i32,
-    value: DWORD,
-    color: u32,
-) {
-    let x_f32 = c * value as f32;
-    let x = pad_x + x_f32 as i32;
-    unsafe {
-        debug_draw_vertical(back_buffer, x, top, bottom, color);
-    }
-}
-
-unsafe fn debug_sync_display(
-    back_buffer: &OffscreenBuffer,
-    markers: &mut [DebugTimeMarker],
-    current_marker_index: isize,
-    sound_output: &SoundOutput,
-) {
-    let pad_x = 16;
-    let pad_y = 16;
-
-    let line_height = 64;
-
-    let c = (back_buffer.width - 2 * pad_x) as f32 / sound_output.sound_buffer_size as f32;
-    for (marker_index, marker) in markers.iter().enumerate() {
-        debug_assert!(marker.output_play_cursor < sound_output.sound_buffer_size);
-        debug_assert!(marker.output_write_cursor < sound_output.sound_buffer_size);
-        debug_assert!(marker.output_location < sound_output.sound_buffer_size);
-        debug_assert!(marker.output_byte_count < sound_output.sound_buffer_size);
-        debug_assert!(marker.flip_play_cursor < sound_output.sound_buffer_size);
-        debug_assert!(marker.flip_write_cursor < sound_output.sound_buffer_size);
-
-        let play_color = 0xFF_FF_FF_FF;
-        let write_color = 0xFF_FF_00_00;
-        let expected_flip_color = 0xFF_FF_FF_00;
-        let play_window_color = 0xFF_FF_00_FF;
-
-        let mut top = pad_y;
-        let mut bottom = pad_y + line_height;
-
-        let current_marker_index_u = if current_marker_index < 0 {
-            0
-        } else {
-            current_marker_index
-        } as usize;
-
-        if marker_index == current_marker_index_u {
-            top += line_height + pad_y;
-            bottom += line_height + pad_y;
-
-            let first_top = top;
-
-            debug_draw_sound_buffer_marker(
-                back_buffer,
-                c,
-                pad_x,
-                top,
-                bottom,
-                marker.output_play_cursor,
-                play_color,
-            );
-            debug_draw_sound_buffer_marker(
-                back_buffer,
-                c,
-                pad_x,
-                top,
-                bottom,
-                marker.output_write_cursor,
-                write_color,
-            );
-
-            top += line_height + pad_y;
-            bottom += line_height + pad_y;
-
-            debug_draw_sound_buffer_marker(
-                back_buffer,
-                c,
-                pad_x,
-                top,
-                bottom,
-                marker.output_location,
-                play_color,
-            );
-            debug_draw_sound_buffer_marker(
-                back_buffer,
-                c,
-                pad_x,
-                top,
-                bottom,
-                marker.output_location + marker.output_byte_count,
-                write_color,
-            );
-
-            top += line_height + pad_y;
-            bottom += line_height + pad_y;
-
-            debug_draw_sound_buffer_marker(
-                back_buffer,
-                c,
-                pad_x,
-                first_top,
-                bottom,
-                marker.expected_flip_play_cursor,
-                expected_flip_color,
-            );
-        }
-
-        debug_draw_sound_buffer_marker(
-            back_buffer,
-            c,
-            pad_x,
-            top,
-            bottom,
-            marker.flip_play_cursor,
-            play_color,
-        );
-        debug_draw_sound_buffer_marker(
-            back_buffer,
-            c,
-            pad_x,
-            top,
-            bottom,
-            marker.flip_play_cursor + 1920 * sound_output.bytes_per_sample,
-            play_window_color,
-        );
-        debug_draw_sound_buffer_marker(
-            back_buffer,
-            c,
-            pad_x,
-            top,
-            bottom,
-            marker.flip_write_cursor,
-            write_color,
-        );
-    }
-}
-
 // TODO: refactor me and remove this allow
 #[allow(clippy::cognitive_complexity)]
 pub fn main() {
@@ -1127,52 +790,7 @@ pub fn main() {
                 let game_update_hz = monitor_refresh_hz as f32 / 2.0;
                 let target_seconds_per_frame = 1.0 / game_update_hz;
 
-                // TODO: Make this like sixty seconds?
-                let samples_per_second = 48_000;
-                let bytes_per_sample = (size_of::<i16>() * 2) as u32;
-                let sound_buffer_size = samples_per_second * bytes_per_sample as u32;
-                // TODO: Actually compute this variance and see
-                // what the lowest reasonable value is.
-                let safety_bytes = (((samples_per_second as f32 * bytes_per_sample as f32)
-                    / game_update_hz)
-                    / 2.0) as u32;
-                let mut sound_output = SoundOutput {
-                    running_sample_index: 0,
-                    bytes_per_sample,
-                    sound_buffer_size,
-                    safety_bytes,
-                    samples_per_second,
-                };
-                init_direct_sound(
-                    window,
-                    sound_output.samples_per_second,
-                    sound_output.sound_buffer_size,
-                );
-                clear_sound_buffer(&sound_output);
-                (*GLOBAL_SOUND_BUFFER).Play(0, 0, DSBPLAY_LOOPING);
-
                 GLOBAL_RUNNING = true;
-
-                if false {
-                    // This tests the PlayCursor/WriteCursor update frequency
-                    // On the my gaming machine, it was 1920 samples.
-                    while GLOBAL_RUNNING {
-                        let mut play_cursor = zeroed();
-                        let mut write_cursor = zeroed();
-                        (*GLOBAL_SOUND_BUFFER)
-                            .GetCurrentPosition(&mut play_cursor, &mut write_cursor);
-
-                        println!("PC:{} WC:{}", play_cursor, write_cursor);
-                    }
-                }
-
-                // TODO: Pool with bitmap virtualalloc
-                let samples = VirtualAlloc(
-                    null_mut(),
-                    sound_output.sound_buffer_size as usize,
-                    MEM_RESERVE | MEM_COMMIT,
-                    PAGE_READWRITE,
-                ) as *mut i16;
 
                 let base_address: LPVOID = if cfg!(debug_assertions) {
                     null_mut::<VOID>().wrapping_add(terabytes(2))
@@ -1256,22 +874,13 @@ pub fn main() {
                     }
                 }
 
-                if !samples.is_null()
-                    && !game_memory.permanent_storage.is_null()
+                if !game_memory.permanent_storage.is_null()
                     && !game_memory.transient_storage.is_null()
                 {
                     let mut new_input: GameInput = zeroed();
                     let mut old_input: GameInput = zeroed();
 
                     let mut last_counter = get_wall_clock();
-                    let mut flip_wall_clock = get_wall_clock();
-
-                    let mut debug_time_marker_index = 0;
-                    let mut debug_time_markers: [DebugTimeMarker; 30] = zeroed();
-
-                    let mut audio_latency_bytes;
-                    let mut audio_latency_seconds;
-                    let mut sound_is_valid = false;
 
                     let mut game = load_game_code(
                         &source_game_code_dll_full_path,
@@ -1535,142 +1144,6 @@ pub fn main() {
                             }
                             (game.update_and_render)(&mut game_memory, &mut new_input, &mut buffer);
 
-                            let audio_wall_clock = get_wall_clock();
-                            let from_begin_to_audio_seconds =
-                                get_seconds_elapsed(flip_wall_clock, audio_wall_clock);
-
-                            let mut play_cursor = zeroed();
-                            let mut write_cursor = zeroed();
-                            match (*GLOBAL_SOUND_BUFFER)
-                                .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
-                            {
-                                DS_OK => {
-                                    /* Here is how sound output computation works.
-                                        We define a safety value that is the number
-                                        of samples we think our game update loop
-                                        may vary by (let's say up to 2ms)
-
-                                        When we wake up to write audio, we will look
-                                        and see what the play cursor position is and we
-                                        will forecast ahead where we think the play
-                                        cursor will be on the next frame boundary.
-                                        We will then look to see if the write cursor is
-                                        before that by at least our safety value.  If
-                                        it is, the target fill position is that frame
-                                        boundary plus one frame.  This gives us perfect
-                                        audio sync in the case of a card that has low
-                                        enough latency.
-                                        If the write cursor is _after_ that safety
-                                        margin, then we assume we can never sync the
-                                        audio perfectly, so we will write one frame's
-                                        worth of audio plus the safety margin's worth
-                                        of guard samples.
-                                    */
-                                    if !sound_is_valid {
-                                        sound_output.running_sample_index =
-                                            write_cursor / sound_output.bytes_per_sample;
-                                        sound_is_valid = true;
-                                    }
-
-                                    let byte_to_lock = (sound_output.running_sample_index
-                                        * sound_output.bytes_per_sample)
-                                        % sound_output.sound_buffer_size;
-
-                                    let expected_sound_bytes_per_frame = ((sound_output
-                                        .samples_per_second
-                                        * sound_output.bytes_per_sample)
-                                        as f32
-                                        / game_update_hz)
-                                        as u32;
-
-                                    let seconds_left_until_flip =
-                                        target_seconds_per_frame - from_begin_to_audio_seconds;
-                                    let expected_bytes_until_flip = ((seconds_left_until_flip
-                                        / target_seconds_per_frame)
-                                        * expected_sound_bytes_per_frame as f32)
-                                        as u32;
-                                    let expected_frame_boundary_byte =
-                                        play_cursor.wrapping_add(expected_bytes_until_flip);
-
-                                    let mut safe_write_cursor = write_cursor;
-                                    if safe_write_cursor < play_cursor {
-                                        safe_write_cursor += sound_output.sound_buffer_size;
-                                    }
-                                    debug_assert!(safe_write_cursor >= play_cursor);
-                                    safe_write_cursor += sound_output.safety_bytes;
-
-                                    let audio_card_is_low_latency =
-                                        safe_write_cursor < expected_frame_boundary_byte;
-
-                                    let target_cursor = if audio_card_is_low_latency {
-                                        expected_frame_boundary_byte
-                                            .wrapping_add(expected_sound_bytes_per_frame)
-                                    } else {
-                                        write_cursor
-                                            + expected_sound_bytes_per_frame
-                                            + sound_output.safety_bytes
-                                    } % sound_output.sound_buffer_size;
-
-                                    let bytes_to_write = if byte_to_lock > target_cursor {
-                                        (sound_output.sound_buffer_size - byte_to_lock)
-                                            + target_cursor
-                                    } else {
-                                        target_cursor - byte_to_lock
-                                    };
-
-                                    let mut sound_buffer = GameSoundOutputBuffer {
-                                        samples_per_second: sound_output.samples_per_second,
-                                        sample_count: bytes_to_write
-                                            / sound_output.bytes_per_sample,
-                                        samples,
-                                    };
-                                    (game.get_sound_samples)(&mut game_memory, &mut sound_buffer);
-
-                                    #[cfg(debug_assertions)]
-                                    {
-                                        let mut marker =
-                                            &mut debug_time_markers[debug_time_marker_index];
-                                        marker.output_play_cursor = play_cursor;
-                                        marker.output_write_cursor = write_cursor;
-                                        marker.output_location = byte_to_lock;
-                                        marker.output_byte_count = bytes_to_write;
-                                        marker.expected_flip_play_cursor =
-                                            expected_frame_boundary_byte;
-                                    }
-
-                                    let mut unwrapped_write_cursor = write_cursor;
-                                    if unwrapped_write_cursor < play_cursor {
-                                        unwrapped_write_cursor += sound_output.sound_buffer_size;
-                                    }
-                                    audio_latency_bytes = unwrapped_write_cursor - play_cursor;
-                                    audio_latency_seconds = (audio_latency_bytes
-                                        / sound_output.bytes_per_sample)
-                                        / sound_output.samples_per_second;
-
-                                    trace!(
-                                        "BTL:{} TC:{} BTW:{} - PC:{} WC:{} DELTA:{} ({}s)",
-                                        byte_to_lock,
-                                        target_cursor,
-                                        bytes_to_write,
-                                        play_cursor,
-                                        write_cursor,
-                                        audio_latency_bytes,
-                                        audio_latency_seconds
-                                    );
-
-                                    fill_sound_buffer(
-                                        &mut sound_output,
-                                        byte_to_lock,
-                                        bytes_to_write,
-                                        &mut sound_buffer,
-                                    );
-                                }
-                                e => {
-                                    warn!("Sound invalid: {}", e);
-                                    sound_is_valid = false;
-                                }
-                            }
-
                             let work_counter = get_wall_clock();
                             let work_seconds_elapsed =
                                 get_seconds_elapsed(last_counter, work_counter);
@@ -1705,12 +1178,6 @@ pub fn main() {
                                 1000.0 * get_seconds_elapsed(last_counter, end_counter);
                             last_counter = end_counter;
 
-                            // debug_sync_display(
-                            //     &GLOBAL_BACK_BUFFER,
-                            //     &mut debug_time_markers,
-                            //     debug_time_marker_index as isize - 1,
-                            //     &sound_output,
-                            // );
                             let dimension = get_window_dimension(window);
                             let device_context = GetDC(window);
                             display_buffer_in_window(
@@ -1721,46 +1188,15 @@ pub fn main() {
                             );
                             ReleaseDC(window, device_context);
 
-                            flip_wall_clock = get_wall_clock();
-
-                            #[cfg(debug_assertions)]
-                            {
-                                let mut play_cursor = zeroed();
-                                let mut write_cursor = zeroed();
-                                if (*GLOBAL_SOUND_BUFFER)
-                                    .GetCurrentPosition(&mut play_cursor, &mut write_cursor)
-                                    == DS_OK
-                                {
-                                    debug_assert!(
-                                        debug_time_marker_index < debug_time_markers.len()
-                                    );
-                                    let mut marker =
-                                        &mut debug_time_markers[debug_time_marker_index];
-                                    marker.flip_play_cursor = play_cursor;
-                                    marker.flip_write_cursor = write_cursor;
-                                }
-                            }
-
                             std::mem::swap(&mut new_input, &mut old_input);
 
                             let fps = 0.0;
 
                             trace!("{}ms/f, {}f/s", ms_per_frame, fps);
-
-                            #[cfg(debug_assertions)]
-                            {
-                                debug_time_marker_index += 1;
-                                if debug_time_marker_index == debug_time_markers.len() {
-                                    debug_time_marker_index = 0;
-                                }
-                            }
                         }
                     }
                 } else {
-                    error!(
-                        "Could not allocate game memory {:?} or samples {:?}",
-                        game_memory, samples
-                    );
+                    error!("Could not allocate game memory {:?}", game_memory);
                 }
             } else {
                 error!("Window wasn't created");

@@ -18,12 +18,12 @@ struct World {
     tile_map: *mut TileMap,
 }
 
-struct HeroBitmaps {
+struct CharacterImage {
     align_x: i32,
     align_y: i32,
-    head: DynamicImage,
-    cape: DynamicImage,
-    torso: DynamicImage,
+    image: DynamicImage,
+    frame_width: u32,
+    frames: u32,
 }
 
 struct State {
@@ -34,8 +34,9 @@ struct State {
     player_p: TileMapPosition,
 
     backdrop: DynamicImage,
-    hero_facing_direction: usize,
-    hero_bitmaps: [HeroBitmaps; 4],
+
+    character_image: CharacterImage,
+    character_walk_frame: u32,
 }
 
 /// This ensures that GameUpdateAndRender has a signature that will match what
@@ -65,50 +66,16 @@ pub unsafe extern "C" fn update_and_render(
 
     if !(*memory).is_initialized {
         (*game_state).backdrop =
-            image::open("data/test/test_background.bmp").expect("could not load background");
+            image::open("data/assets/Bricks.png").expect("could not load background");
 
-        (*game_state).hero_bitmaps = [
-            HeroBitmaps {
-                head: image::open("data/test/test_hero_right_head.bmp")
-                    .expect("could not load right head"),
-                cape: image::open("data/test/test_hero_right_cape.bmp")
-                    .expect("could not load right cape"),
-                torso: image::open("data/test/test_hero_right_torso.bmp")
-                    .expect("could not load right torso"),
-                align_x: 72,
-                align_y: 182,
-            },
-            HeroBitmaps {
-                head: image::open("data/test/test_hero_back_head.bmp")
-                    .expect("could not load back head"),
-                cape: image::open("data/test/test_hero_back_cape.bmp")
-                    .expect("could not load back cape"),
-                torso: image::open("data/test/test_hero_back_torso.bmp")
-                    .expect("could not load back torso"),
-                align_x: 72,
-                align_y: 182,
-            },
-            HeroBitmaps {
-                head: image::open("data/test/test_hero_left_head.bmp")
-                    .expect("could not load left head"),
-                cape: image::open("data/test/test_hero_left_cape.bmp")
-                    .expect("could not load left cape"),
-                torso: image::open("data/test/test_hero_left_torso.bmp")
-                    .expect("could not load left torso"),
-                align_x: 72,
-                align_y: 182,
-            },
-            HeroBitmaps {
-                head: image::open("data/test/test_hero_front_head.bmp")
-                    .expect("could not load front head"),
-                cape: image::open("data/test/test_hero_front_cape.bmp")
-                    .expect("could not load front cape"),
-                torso: image::open("data/test/test_hero_front_torso.bmp")
-                    .expect("could not load front torso"),
-                align_x: 72,
-                align_y: 182,
-            },
-        ];
+        (*game_state).character_image = CharacterImage {
+            image: image::open("data/assets/Skeleton Walk.png")
+                .expect("could not load skeleton walk png"),
+            align_x: 10,
+            align_y: 33,
+            frame_width: 22,
+            frames: 13,
+        };
         (*game_state).camera_p.abs_tile_x = 17 / 2;
         (*game_state).camera_p.abs_tile_y = 9 / 2;
 
@@ -265,20 +232,24 @@ pub unsafe extern "C" fn update_and_render(
             };
             let d_player_y = player_speed
                 * if (*controller).move_up.ended_down {
-                    (*game_state).hero_facing_direction = 1;
+                    (*game_state).character_walk_frame += 1;
+                    (*game_state).character_walk_frame %= (*game_state).character_image.frames;
                     1.0
                 } else if (*controller).move_down.ended_down {
-                    (*game_state).hero_facing_direction = 3;
+                    (*game_state).character_walk_frame += 1;
+                    (*game_state).character_walk_frame %= (*game_state).character_image.frames;
                     -1.0
                 } else {
                     0.0
                 };
             let d_player_x = player_speed
                 * if (*controller).move_left.ended_down {
-                    (*game_state).hero_facing_direction = 2;
+                    (*game_state).character_walk_frame += 1;
+                    (*game_state).character_walk_frame %= (*game_state).character_image.frames;
                     -1.0
                 } else if (*controller).move_right.ended_down {
-                    (*game_state).hero_facing_direction = 0;
+                    (*game_state).character_walk_frame += 1;
+                    (*game_state).character_walk_frame %= (*game_state).character_image.frames;
                     1.0
                 } else {
                     0.0
@@ -337,7 +308,14 @@ pub unsafe extern "C" fn update_and_render(
         }
     }
 
-    draw_bitmap(&(*buffer), &(*game_state).backdrop, 0.0, 0.0);
+    draw_image(
+        &(*buffer),
+        &(*game_state).backdrop,
+        0.0,
+        0.0,
+        (*game_state).backdrop.width(),
+        0,
+    );
 
     let screen_center_x = 0.5 * (*buffer).width as f32;
     let screen_center_y = 0.5 * (*buffer).height as f32;
@@ -383,48 +361,19 @@ pub unsafe extern "C" fn update_and_render(
         &(*game_state).camera_p,
     );
 
-    let player_r = 1.0;
-    let player_g = 1.0;
-    let player_b = 0.0;
     let player_ground_point_x = screen_center_x + meters_to_pixels * diff.dx;
     let player_ground_point_y = screen_center_y - meters_to_pixels * diff.dy;
-    let player_left = player_ground_point_x - 0.5 * meters_to_pixels * PLAYER_WIDTH;
-    let player_top = player_ground_point_y - meters_to_pixels * PLAYER_HEIGHT;
-    draw_rectangle(
-        &(*buffer),
-        player_left,
-        player_top,
-        player_left + meters_to_pixels * PLAYER_WIDTH,
-        player_top + meters_to_pixels * PLAYER_HEIGHT,
-        player_r,
-        player_g,
-        player_b,
-    );
 
-    let hero_bitmaps = &(*game_state).hero_bitmaps[(*game_state).hero_facing_direction];
-    draw_bitmap_align(
+    let character_image = &(*game_state).character_image;
+    draw_animated_image(
         &(*buffer),
-        &hero_bitmaps.torso,
+        &character_image.image,
         player_ground_point_x,
         player_ground_point_y,
-        hero_bitmaps.align_x,
-        hero_bitmaps.align_y,
-    );
-    draw_bitmap_align(
-        &(*buffer),
-        &hero_bitmaps.cape,
-        player_ground_point_x,
-        player_ground_point_y,
-        hero_bitmaps.align_x,
-        hero_bitmaps.align_y,
-    );
-    draw_bitmap_align(
-        &(*buffer),
-        &hero_bitmaps.head,
-        player_ground_point_x,
-        player_ground_point_y,
-        hero_bitmaps.align_x,
-        hero_bitmaps.align_y,
+        character_image.align_x,
+        character_image.align_y,
+        character_image.frame_width,
+        (*game_state).character_walk_frame,
     );
 }
 
@@ -481,31 +430,39 @@ fn draw_rectangle(
     }
 }
 
-unsafe fn draw_bitmap_align(
+unsafe fn draw_animated_image(
     buffer: &GameOffscreenBuffer,
     bitmap: &DynamicImage,
     real_x: f32,
     real_y: f32,
     align_x: i32,
     align_y: i32,
+    frame_width: u32,
+    frame: u32,
 ) {
-    draw_bitmap(
+    let x = real_x - align_x as f32;
+    let y = real_y - align_y as f32;
+    draw_image(
         buffer,
         bitmap,
-        real_x - align_x as f32,
-        real_y - align_y as f32,
-    );
+        x,
+        y,
+        frame_width,
+        (frame * frame_width) as i32,
+    )
 }
 
-unsafe fn draw_bitmap(
+unsafe fn draw_image(
     buffer: &GameOffscreenBuffer,
     bitmap: &DynamicImage,
     real_x: f32,
     real_y: f32,
+    width: u32,
+    x_offset: i32,
 ) {
     let mut min_x = real_x.round() as i32;
     let mut min_y = real_y.round() as i32;
-    let mut max_x = real_x as i32 + bitmap.width() as i32;
+    let mut max_x = real_x as i32 + width as i32;
     let mut max_y = real_y as i32 + bitmap.height() as i32;
 
     let mut source_offset_x = 0;
@@ -513,6 +470,7 @@ unsafe fn draw_bitmap(
         source_offset_x = -min_x;
         min_x = 0;
     }
+    source_offset_x += x_offset;
 
     let mut source_offset_y = 0;
     if min_y < 0 {

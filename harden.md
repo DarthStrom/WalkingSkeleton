@@ -1,7 +1,6 @@
 Things to do once it works to harden
 ====================================
 
-- change character bmp to skeleton character
 - get rid of as much unsafe as we can
 - fix clippy warnings
 - address all TODO's

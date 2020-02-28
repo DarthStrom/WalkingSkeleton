@@ -1,5 +1,3 @@
-use crate::common::*;
-
 pub struct TileMapDifference {
     pub dx: f32,
     pub dy: f32,
@@ -32,11 +30,11 @@ pub struct TileChunkPosition {
 
 pub struct TileChunk {
     // TODO: Real structure for a tile
-    pub tiles: *mut u32,
+    pub tiles: Vec<u32>,
 }
 
 pub struct TileMap {
-    pub chunk_shift: i32,
+    pub chunk_shift: u32,
     pub chunk_mask: u32,
     pub chunk_dim: u32,
 
@@ -46,30 +44,56 @@ pub struct TileMap {
     pub tile_chunk_count_y: u32,
     pub tile_chunk_count_z: u32,
 
-    pub tile_chunks: *mut TileChunk,
+    pub tile_chunks: Vec<TileChunk>,
 }
 
-unsafe fn get_tile_chunk(
-    tile_map: *mut TileMap,
+fn get_tile_chunk(
+    tile_map: &TileMap,
     tile_chunk_x: u32,
     tile_chunk_y: u32,
     tile_chunk_z: u32,
-) -> Option<*mut TileChunk> {
-    if tile_chunk_x < (*tile_map).tile_chunk_count_x
-        && tile_chunk_y < (*tile_map).tile_chunk_count_y
-        && tile_chunk_z < (*tile_map).tile_chunk_count_z
-    {
-        Some((*tile_map).tile_chunks.offset(
-            (tile_chunk_z * (*tile_map).tile_chunk_count_y * (*tile_map).tile_chunk_count_x
-                + tile_chunk_y * (*tile_map).tile_chunk_count_x
-                + tile_chunk_x) as isize,
-        ))
+) -> Option<&TileChunk> {
+    if let Some(index) = get_chunk_index(tile_map, tile_chunk_x, tile_chunk_y, tile_chunk_z) {
+        tile_map.tile_chunks.get(index)
     } else {
         None
     }
 }
 
-unsafe fn get_tile_value_rel(
+fn get_tile_chunk_mut(
+    tile_map: &mut TileMap,
+    tile_chunk_x: u32,
+    tile_chunk_y: u32,
+    tile_chunk_z: u32,
+) -> Option<&mut TileChunk> {
+    if let Some(index) = get_chunk_index(tile_map, tile_chunk_x, tile_chunk_y, tile_chunk_z) {
+        tile_map.tile_chunks.get_mut(index)
+    } else {
+        None
+    }
+}
+
+fn get_chunk_index(
+    tile_map: &TileMap,
+    tile_chunk_x: u32,
+    tile_chunk_y: u32,
+    tile_chunk_z: u32,
+) -> Option<usize> {
+    if tile_chunk_x < tile_map.tile_chunk_count_x
+        && tile_chunk_y < tile_map.tile_chunk_count_y
+        && tile_chunk_z < tile_map.tile_chunk_count_z
+    {
+        Some(
+            (tile_chunk_z * tile_map.tile_chunk_count_y * tile_map.tile_chunk_count_x
+                + tile_chunk_y * tile_map.tile_chunk_count_x
+                + tile_chunk_x) as usize,
+        )
+    } else {
+        None
+    }
+}
+
+fn get_tile_value_rel(
     tile_map: &TileMap,
     tile_chunk: &TileChunk,
     tile_x: u32,
@@ -78,28 +102,24 @@ unsafe fn get_tile_value_rel(
     debug_assert!(tile_x < tile_map.chunk_dim);
     debug_assert!(tile_y < tile_map.chunk_dim);
 
-    if !tile_chunk.tiles.is_null() {
-        *tile_chunk
-            .tiles
-            .offset((tile_y * tile_map.chunk_dim + tile_x) as isize)
+    if let Some(value) = tile_chunk.tiles.get((tile_y * tile_map.chunk_dim + tile_x) as usize) {
+        *value
     } else {
         0
     }
 }
 
-unsafe fn set_tile_value_for_chunk(
-    tile_map: &TileMap,
-    tile_chunk: &TileChunk,
+fn set_tile_value_for_chunk(
+    chunk_dim: u32,
+    tile_chunk: &mut TileChunk,
     tile_x: u32,
     tile_y: u32,
     tile_value: u32,
 ) {
-    debug_assert!(tile_x < tile_map.chunk_dim);
-    debug_assert!(tile_y < tile_map.chunk_dim);
+    debug_assert!(tile_x < chunk_dim);
+    debug_assert!(tile_y < chunk_dim);
 
-    *tile_chunk
-        .tiles
-        .offset((tile_y * tile_map.chunk_dim + tile_x) as isize) = tile_value;
+    tile_chunk.tiles[(tile_y * chunk_dim + tile_x) as usize] = tile_value
 }
 
 fn get_chunk_position_for(
@@ -117,13 +137,13 @@ fn get_chunk_position_for(
     }
 }
 
-pub unsafe fn get_tile_value_abs(
-    tile_map: *mut TileMap,
+pub fn get_tile_value_abs(
+    tile_map: &TileMap,
     abs_tile_x: u32,
     abs_tile_y: u32,
     abs_tile_z: u32,
 ) -> u32 {
-    let chunk_pos = get_chunk_position_for(&(*tile_map), abs_tile_x, abs_tile_y, abs_tile_z);
+    let chunk_pos = get_chunk_position_for(tile_map, abs_tile_x, abs_tile_y, abs_tile_z);
     if let Some(tile_chunk) = get_tile_chunk(
         tile_map,
         chunk_pos.tile_chunk_x,
@@ -131,8 +151,8 @@ pub unsafe fn get_tile_value_abs(
         chunk_pos.tile_chunk_z,
     ) {
         get_tile_value_rel(
-            &(*tile_map),
-            &(*tile_chunk),
+            tile_map,
+            tile_chunk,
             chunk_pos.rel_tile_x,
             chunk_pos.rel_tile_y,
         )
@@ -141,42 +161,43 @@ pub unsafe fn get_tile_value_abs(
     }
 }
 
-pub unsafe fn get_tile_value(tile_map: *mut TileMap, pos: &TileMapPosition) -> u32 {
+pub fn get_tile_value(tile_map: &TileMap, pos: &TileMapPosition) -> u32 {
     get_tile_value_abs(tile_map, pos.abs_tile_x, pos.abs_tile_y, pos.abs_tile_z)
 }
 
-pub unsafe fn is_tile_map_point_empty(tile_map: *mut TileMap, pos: &TileMapPosition) -> bool {
+pub fn is_tile_map_point_empty(tile_map: &TileMap, pos: &TileMapPosition) -> bool {
+    // TODO match an enum for this
     [1, 3, 4].contains(&get_tile_value(tile_map, pos))
 }
 
-pub unsafe fn set_tile_value(
-    arena: *mut MemoryArena,
-    tile_map: *mut TileMap,
+pub fn set_tile_value(
+    // arena: *mut MemoryArena,
+    tile_map: &mut TileMap,
     abs_tile_x: u32,
     abs_tile_y: u32,
     abs_tile_z: u32,
     tile_value: u32,
 ) {
-    let chunk_pos = get_chunk_position_for(&(*tile_map), abs_tile_x, abs_tile_y, abs_tile_z);
-    let tile_chunk = get_tile_chunk(
+    let chunk_pos = get_chunk_position_for(tile_map, abs_tile_x, abs_tile_y, abs_tile_z);
+    let chunk_dim = tile_map.chunk_dim;
+    let tile_chunk = get_tile_chunk_mut(
         tile_map,
         chunk_pos.tile_chunk_x,
         chunk_pos.tile_chunk_y,
         chunk_pos.tile_chunk_z,
     )
-    .expect("could not get tile chunk");
+    .expect("could not get tile_chunk");
 
-    if (*tile_chunk).tiles.is_null() {
-        let tile_count = ((*tile_map).chunk_dim * (*tile_map).chunk_dim) as usize;
-        (*tile_chunk).tiles = push_array::<u32>(arena, tile_count);
-        for tile_index in 0..tile_count {
-            (*(*tile_chunk).tiles.add(tile_index)) = 1;
+    if tile_chunk.tiles.is_empty() {
+        let tile_count = chunk_dim * chunk_dim;
+        for _ in 0..tile_count {
+            tile_chunk.tiles.push(1);
         }
     }
 
     set_tile_value_for_chunk(
-        &(*tile_map),
-        &(*tile_chunk),
+        chunk_dim,
+        tile_chunk,
         chunk_pos.rel_tile_x,
         chunk_pos.rel_tile_y,
         tile_value,

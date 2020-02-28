@@ -15,7 +15,7 @@ extern crate log;
 use std::f32;
 
 struct World {
-    tile_map: *mut TileMap,
+    tile_map: TileMap,
 }
 
 struct CharacterImage {
@@ -92,25 +92,23 @@ pub unsafe extern "C" fn update_and_render(
 
         (*game_state).world = push_struct::<World>(&mut (*game_state).world_arena);
         let world = (*game_state).world;
-        (*world).tile_map = push_struct::<TileMap>(&mut (*game_state).world_arena);
 
-        let tile_map = (*world).tile_map;
+        let tile_map = &mut (*world).tile_map;
 
-        (*tile_map).chunk_shift = 4;
-        (*tile_map).chunk_mask = (1 << (*tile_map).chunk_shift) - 1;
-        (*tile_map).chunk_dim = 1 << (*tile_map).chunk_shift;
+        tile_map.chunk_shift = 4;
+        tile_map.chunk_mask = (1 << tile_map.chunk_shift) - 1;
+        tile_map.chunk_dim = 1 << tile_map.chunk_shift;
 
-        (*tile_map).tile_chunk_count_x = 128;
-        (*tile_map).tile_chunk_count_y = 128;
-        (*tile_map).tile_chunk_count_z = 2;
-        (*tile_map).tile_chunks = push_array::<TileChunk>(
-            &mut (*game_state).world_arena,
-            ((*tile_map).tile_chunk_count_x
-                * (*tile_map).tile_chunk_count_y
-                * (*tile_map).tile_chunk_count_z) as usize,
-        );
+        tile_map.tile_chunk_count_x = 128;
+        tile_map.tile_chunk_count_y = 128;
+        tile_map.tile_chunk_count_z = 2;
+        let tile_chunk_count =
+            tile_map.tile_chunk_count_x * tile_map.tile_chunk_count_y * tile_map.tile_chunk_count_z;
+        for _ in 0..tile_chunk_count {
+            tile_map.tile_chunks.push(TileChunk { tiles: vec![] })
+        }
 
-        (*tile_map).tile_side_in_meters = 1.4;
+        tile_map.tile_side_in_meters = 1.4;
 
         let tiles_per_width = 17;
         let tiles_per_height = 9;
@@ -172,14 +170,7 @@ pub unsafe extern "C" fn update_and_render(
                         1
                     };
 
-                    set_tile_value(
-                        &mut (*game_state).world_arena,
-                        (*world).tile_map,
-                        abs_tile_x,
-                        abs_tile_y,
-                        abs_tile_z,
-                        tile_value,
-                    );
+                    set_tile_value(tile_map, abs_tile_x, abs_tile_y, abs_tile_z, tile_value);
                 }
             }
 
@@ -214,10 +205,10 @@ pub unsafe extern "C" fn update_and_render(
     }
 
     let world = (*game_state).world;
-    let tile_map = (*world).tile_map;
+    let tile_map = &mut (*world).tile_map;
 
     let tile_side_in_pixels = 60;
-    let meters_to_pixels = tile_side_in_pixels as f32 / (*tile_map).tile_side_in_meters;
+    let meters_to_pixels = tile_side_in_pixels as f32 / tile_map.tile_side_in_meters;
 
     for controller_index in 0..(*input).controllers.len() {
         let controller = common::get_controller(input, controller_index);
@@ -259,16 +250,16 @@ pub unsafe extern "C" fn update_and_render(
             let mut new_player_p = (*game_state).player_p.clone();
             new_player_p.offset_x += (*input).dt_for_frame * d_player_x;
             new_player_p.offset_y += (*input).dt_for_frame * d_player_y;
-            new_player_p = recanonicalize_position(&(*tile_map), new_player_p);
+            new_player_p = recanonicalize_position(tile_map, new_player_p);
             // TODO: Delta function that auto-recanonicalizes
 
             let mut player_left = new_player_p.clone();
             player_left.offset_x -= 0.5 * PLAYER_WIDTH;
-            player_left = recanonicalize_position(&(*tile_map), player_left);
+            player_left = recanonicalize_position(tile_map, player_left);
 
             let mut player_right = new_player_p.clone();
             player_right.offset_x += 0.5 * PLAYER_WIDTH;
-            player_right = recanonicalize_position(&(*tile_map), player_right);
+            player_right = recanonicalize_position(tile_map, player_right);
 
             if is_tile_map_point_empty(tile_map, &new_player_p)
                 && is_tile_map_point_empty(tile_map, &player_left)
@@ -288,21 +279,17 @@ pub unsafe extern "C" fn update_and_render(
 
             (*game_state).camera_p.abs_tile_z = (*game_state).player_p.abs_tile_z;
 
-            let diff = subtract(
-                &(*tile_map),
-                &(*game_state).player_p,
-                &(*game_state).camera_p,
-            );
-            if diff.dx > (9.0 * (*tile_map).tile_side_in_meters) {
+            let diff = subtract(tile_map, &(*game_state).player_p, &(*game_state).camera_p);
+            if diff.dx > (9.0 * tile_map.tile_side_in_meters) {
                 (*game_state).camera_p.abs_tile_x += 17;
             }
-            if diff.dx < -(9.0 * (*tile_map).tile_side_in_meters) {
+            if diff.dx < -(9.0 * tile_map.tile_side_in_meters) {
                 (*game_state).camera_p.abs_tile_x -= 17;
             }
-            if diff.dy > (5.0 * (*tile_map).tile_side_in_meters) {
+            if diff.dy > (5.0 * tile_map.tile_side_in_meters) {
                 (*game_state).camera_p.abs_tile_y += 9;
             }
-            if diff.dy < -(5.0 * (*tile_map).tile_side_in_meters) {
+            if diff.dy < -(5.0 * tile_map.tile_side_in_meters) {
                 (*game_state).camera_p.abs_tile_y -= 9;
             }
         }
@@ -355,11 +342,7 @@ pub unsafe extern "C" fn update_and_render(
         }
     }
 
-    let diff = subtract(
-        &(*tile_map),
-        &(*game_state).player_p,
-        &(*game_state).camera_p,
-    );
+    let diff = subtract(tile_map, &(*game_state).player_p, &(*game_state).camera_p);
 
     let player_ground_point_x = screen_center_x + meters_to_pixels * diff.dx;
     let player_ground_point_y = screen_center_y - meters_to_pixels * diff.dy;

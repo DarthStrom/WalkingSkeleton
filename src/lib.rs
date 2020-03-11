@@ -47,7 +47,7 @@ const PLAYER_HEIGHT: f32 = 1.4;
 const PLAYER_WIDTH: f32 = 0.75 * PLAYER_HEIGHT;
 
 // TODO: platform independent code should get priority for removing unsafe
-unsafe fn initialize_arena(arena: *mut MemoryArena, size: usize, base: *mut u8) {
+fn initialize_arena(arena: &mut MemoryArena, size: usize, base: *mut u8) {
     (*arena).size = size;
     (*arena).base = base;
     (*arena).used = 0;
@@ -413,7 +413,7 @@ fn draw_rectangle(
     }
 }
 
-unsafe fn draw_animated_image(
+fn draw_animated_image(
     buffer: &GameOffscreenBuffer,
     bitmap: &DynamicImage,
     real_x: f32,
@@ -425,6 +425,7 @@ unsafe fn draw_animated_image(
 ) {
     let x = real_x - align_x as f32;
     let y = real_y - align_y as f32;
+
     draw_image(
         buffer,
         bitmap,
@@ -435,7 +436,7 @@ unsafe fn draw_animated_image(
     )
 }
 
-unsafe fn draw_image(
+fn draw_image(
     buffer: &GameOffscreenBuffer,
     bitmap: &DynamicImage,
     real_x: f32,
@@ -469,38 +470,40 @@ unsafe fn draw_image(
         max_y = buffer.height;
     }
 
-    let mut dest_row = (buffer.memory as *mut u8)
-        .offset((min_x * buffer.bytes_per_pixel + min_y * buffer.pitch) as isize);
-    for y in min_y..max_y {
-        #[allow(clippy::cast_ptr_alignment)]
-        let mut dest = dest_row as *mut u32;
-        for x in min_x..max_x {
-            let source_x = (source_offset_x + x - min_x) as u32;
-            let source_y = (source_offset_y + y - min_y) as u32;
+    unsafe {
+        let mut dest_row = (buffer.memory as *mut u8)
+            .offset((min_x * buffer.bytes_per_pixel + min_y * buffer.pitch) as isize);
+        for y in min_y..max_y {
+            #[allow(clippy::cast_ptr_alignment)]
+            let mut dest = dest_row as *mut u32;
+            for x in min_x..max_x {
+                let source_x = (source_offset_x + x - min_x) as u32;
+                let source_y = (source_offset_y + y - min_y) as u32;
 
-            if source_x < bitmap.width() && source_y < bitmap.height() {
-                let pixel = bitmap.get_pixel(source_x, source_y);
+                if source_x < bitmap.width() && source_y < bitmap.height() {
+                    let pixel = bitmap.get_pixel(source_x, source_y);
 
-                let a = pixel[3] as f32 / 255.0;
-                let sr = pixel[0] as f32;
-                let sg = pixel[1] as f32;
-                let sb = pixel[2] as f32;
+                    let a = pixel[3] as f32 / 255.0;
+                    let sr = pixel[0] as f32;
+                    let sg = pixel[1] as f32;
+                    let sb = pixel[2] as f32;
 
-                let dr = ((*dest >> 16) & 0xFF) as f32;
-                let dg = ((*dest >> 8) & 0xFF) as f32;
-                let db = (*dest & 0xFF) as f32;
+                    let dr = ((*dest >> 16) & 0xFF) as f32;
+                    let dg = ((*dest >> 8) & 0xFF) as f32;
+                    let db = (*dest & 0xFF) as f32;
 
-                // TODO: Investigate premultiplied alpha
-                let r = (1.0 - a) * dr + a * sr;
-                let g = (1.0 - a) * dg + a * sg;
-                let b = (1.0 - a) * db + a * sb;
+                    // TODO: Investigate premultiplied alpha
+                    let r = (1.0 - a) * dr + a * sr;
+                    let g = (1.0 - a) * dg + a * sg;
+                    let b = (1.0 - a) * db + a * sb;
 
-                *dest = (((r + 0.5) as u32) << 16) | ((g + 0.5) as u32) << 8 | (b + 0.5) as u32;
+                    *dest = (((r + 0.5) as u32) << 16) | ((g + 0.5) as u32) << 8 | (b + 0.5) as u32;
+                }
+
+                dest = dest.add(1);
             }
 
-            dest = dest.add(1);
+            dest_row = dest_row.offset(buffer.pitch as isize);
         }
-
-        dest_row = dest_row.offset(buffer.pitch as isize);
     }
 }

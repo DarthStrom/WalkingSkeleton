@@ -171,7 +171,6 @@ pub fn is_tile_map_point_empty(tile_map: &TileMap, pos: &TileMapPosition) -> boo
 }
 
 pub fn set_tile_value(
-    // arena: *mut MemoryArena,
     tile_map: &mut TileMap,
     abs_tile_x: u32,
     abs_tile_y: u32,

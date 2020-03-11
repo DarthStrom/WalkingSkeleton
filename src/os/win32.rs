@@ -19,8 +19,12 @@
    Just a partial list of stuff!!
 */
 
+mod safety;
+
 use crate::common::*;
-use std::{ffi::*, iter::once, mem::*, os::windows::ffi::OsStrExt, ptr::null_mut};
+use core::{iter::once, mem::*, ptr::null_mut};
+use safety::*;
+use std::{ffi::*, os::windows::ffi::OsStrExt};
 use winapi::{
     ctypes::c_void,
     shared::{minwindef::LRESULT, minwindef::*, windef::*, winerror::*},
@@ -107,12 +111,8 @@ fn win32_string(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(once(0)).collect()
 }
 
-unsafe fn get_exe_file_name(state: &mut State) {
-    let _ = GetModuleFileNameW(
-        null_mut(),
-        &mut state.exe_file_name[0],
-        state.exe_file_name.len() as DWORD,
-    );
+fn get_exe_file_name(state: &mut State) {
+    state.exe_file_name = get_module_file_name();
     let mut scan = 0;
     while state.exe_file_name[scan] != 0 {
         if state.exe_file_name[scan] == ('\\' as u16) {
@@ -122,7 +122,7 @@ unsafe fn get_exe_file_name(state: &mut State) {
     }
 }
 
-unsafe fn build_exe_path_file_name(state: &State, file_name: &str, dest: &mut [u16; MAX_PATH]) {
+fn build_exe_path_file_name(state: &State, file_name: &str, dest: &mut [u16; MAX_PATH]) {
     let file_name_w = win32_string(file_name);
     let mut i = 0;
     while i < state.one_past_last_exe_file_name_slash {
@@ -161,18 +161,8 @@ struct State {
     one_past_last_exe_file_name_slash: usize,
 }
 
-unsafe fn get_last_write_time(filename: &[u16; MAX_PATH]) -> FILETIME {
-    let mut last_write_time: FILETIME = zeroed();
-    let mut data: WIN32_FILE_ATTRIBUTE_DATA = zeroed();
-    if GetFileAttributesExW(
-        filename.as_ptr(),
-        GetFileExInfoStandard,
-        &mut data as *mut WIN32_FILE_ATTRIBUTE_DATA as *mut c_void,
-    ) != 0
-    {
-        last_write_time = data.ftLastWriteTime;
-    }
-    last_write_time
+fn get_last_write_time(filename: &[u16; MAX_PATH]) -> FILETIME {
+    get_file_attributes(filename).ftLastWriteTime
 }
 
 unsafe fn load_game_code(
@@ -197,7 +187,7 @@ unsafe fn load_game_code(
             let c_update_and_render = CString::new("update_and_render").unwrap();
 
             let update_and_render_ptr =
-                GetProcAddress(result.game_code_dll, c_update_and_render.as_ptr());
+                get_proc_address(result.game_code_dll, c_update_and_render.as_ptr());
 
             result.update_and_render = transmute(update_and_render_ptr);
             result.is_valid = !update_and_render_ptr.is_null();
@@ -583,8 +573,7 @@ unsafe fn process_pending_messages(
     state: &mut State,
     keyboard_controller: &mut GameControllerInput,
 ) {
-    let mut message = zeroed();
-    while PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) != 0 {
+    while let Some(message) = peek_message_remove() {
         match message.message {
             WM_QUIT => GLOBAL_RUNNING = false,
             WM_SYSKEYDOWN | WM_SYSKEYUP | WM_KEYDOWN | WM_KEYUP => {
@@ -843,7 +832,7 @@ pub fn main() {
                     );
                     if (*replay_buffer).file_handle == INVALID_HANDLE_VALUE {
                         let last_error = GetLastError();
-                        error!("Could not create file: {:?}", last_error,);
+                        error!("Could not create file: {:?}", last_error);
                     }
                     let mut max_size: LARGE_INTEGER = zeroed();
                     *max_size.QuadPart_mut() = win32_state.total_size as i64;

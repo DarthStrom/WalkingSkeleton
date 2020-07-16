@@ -9,4 +9,5 @@ Things to do once it works to harden
 - port to other platforms
 - tune performance
 - documentation
+- README
 - write plan for building basic game engine driven by game clones

@@ -30,8 +30,8 @@ use winapi::{
     shared::{minwindef::LRESULT, minwindef::*, windef::*, winerror::*},
     um::{
         errhandlingapi::GetLastError, fileapi::*, handleapi::*, libloaderapi::*, memoryapi::*,
-        minwinbase::*, mmsystem::*, profileapi::*, synchapi::*, timeapi::*, winbase::*, wingdi::*,
-        winnt::*, winuser::*, xinput::*,
+        minwinbase::*, mmsystem::*, profileapi::*, synchapi::*, timeapi::*, wingdi::*, winnt::*,
+        winuser::*, xinput::*,
     },
 };
 
@@ -181,8 +181,8 @@ unsafe fn load_game_code(
     {
         // TODO: Automatic determination of when updates are necessary.
 
-        CopyFileW(source_dll_path.as_ptr(), temp_dll_path.as_ptr(), FALSE);
-        result.game_code_dll = LoadLibraryW(temp_dll_path.as_ptr());
+        copy_file_overwrite(source_dll_path, temp_dll_path);
+        result.game_code_dll = load_library(temp_dll_path);
         if !result.game_code_dll.is_null() {
             let c_update_and_render = CString::new("update_and_render").unwrap();
 
